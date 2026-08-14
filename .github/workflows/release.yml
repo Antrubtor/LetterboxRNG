@@ -1,0 +1,47 @@
+name: Build & Release Extension
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Package and Release Extension
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Extract Tag Version
+        id: vars
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Package Extension
+        run: |
+          mkdir -p build
+          # Pack main standalone zip
+          zip -r "letterboxd-watchlist-picker-${{ steps.vars.outputs.VERSION }}.zip" \
+            manifest.json content.js content.css popup.html popup.css popup.js icons/
+          
+          # Pack Firefox specific .xpi package
+          cp "letterboxd-watchlist-picker-${{ steps.vars.outputs.VERSION }}.zip" \
+             "letterboxd-watchlist-picker-${{ steps.vars.outputs.VERSION }}-firefox.xpi"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Release ${{ steps.vars.outputs.VERSION }}"
+          tag_name: ${{ github.ref }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            letterboxd-watchlist-picker-${{ steps.vars.outputs.VERSION }}.zip
+            letterboxd-watchlist-picker-${{ steps.vars.outputs.VERSION }}-firefox.xpi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

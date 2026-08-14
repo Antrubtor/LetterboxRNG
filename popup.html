@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Letterboxd Watchlist Picker</title>
+    <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+    <div class="popup-container">
+        <header class="popup-header">
+            <div class="logo-box">
+                <div class="letterboxd-dots">
+                    <span class="dot dot-orange"></span>
+                    <span class="dot dot-green"></span>
+                    <span class="dot dot-cyan"></span>
+                </div>
+                <div>
+                    <h1 class="title">Letterboxd Picker</h1>
+                    <p class="subtitle">Random Selection</p>
+                </div>
+            </div>
+            <span class="status-pill active">Active</span>
+        </header>
+
+        <main class="popup-content">
+            <div class="info-card">
+                <p class="info-text">
+                    Visit any <strong>Watchlist</strong> page on Letterboxd and click the dice button in the bottom-left corner to roll a random movie.
+                </p>
+            </div>
+
+            <div class="settings-group">
+                <div class="setting-item">
+                    <span class="setting-label">Sound effects</span>
+                    <label class="switch">
+                        <input type="checkbox" id="toggle-sound" checked>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+            </div>
+
+            <div class="quick-links">
+                <a href="https://letterboxd.com/watchlist/" target="_blank" class="btn-open-watchlist">
+                    Open Watchlist
+                </a>
+            </div>
+        </main>
+
+        <footer class="popup-footer">
+            <span>Chrome • Safari • Firefox • Edge</span>
+        </footer>
+    </div>
+    <script src="popup.js"></script>
+</body>
+</html>

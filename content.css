@@ -1,0 +1,718 @@
+/* ==========================================================================
+   Letterboxd Watchlist Picker - Style Officiel Letterboxd
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1. Floating Action Button (Style Letterboxd)
+   -------------------------------------------------------------------------- */
+#lbrnd-dice-btn {
+    position: fixed;
+    bottom: 24px;
+    left: 24px;
+    width: 48px;
+    height: 48px;
+    border-radius: 4px;
+    background: #202830;
+    border: 1px solid #303840;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+    cursor: pointer;
+    z-index: 999999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+    outline: none;
+    user-select: none;
+    padding: 0;
+}
+
+#lbrnd-dice-btn:hover {
+    background: #283038;
+    border-color: #00e054;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.75);
+}
+
+#lbrnd-dice-btn:active {
+    transform: translateY(0);
+}
+
+#lbrnd-dice-btn svg {
+    width: 26px;
+    height: 26px;
+    display: block;
+}
+
+/* Tooltip style Letterboxd */
+#lbrnd-dice-tooltip {
+    position: absolute;
+    left: 60px;
+    background: #14181c;
+    color: #99aabb;
+    padding: 6px 12px;
+    border-radius: 3px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    white-space: nowrap;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.7);
+    border: 1px solid #303840;
+    pointer-events: none;
+    opacity: 0;
+    transform: translateX(-4px);
+    transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+#lbrnd-dice-tooltip::before {
+    content: '';
+    position: absolute;
+    left: -4px;
+    top: 50%;
+    transform: translateY(-50%) rotate(45deg);
+    width: 7px;
+    height: 7px;
+    background: #14181c;
+    border-left: 1px solid #303840;
+    border-bottom: 1px solid #303840;
+}
+
+#lbrnd-dice-btn:hover #lbrnd-dice-tooltip {
+    opacity: 1;
+    transform: translateX(0);
+    color: #ffffff;
+}
+
+/* --------------------------------------------------------------------------
+   2. Fullscreen Modal Overlay
+   -------------------------------------------------------------------------- */
+#lbrnd-modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(10, 13, 16, 0.88);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    z-index: 10000000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: #99aabb;
+    box-sizing: border-box;
+}
+
+#lbrnd-modal-overlay.active {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+#lbrnd-modal-container {
+    width: 92%;
+    max-width: 880px;
+    background: #14181c;
+    border: 1px solid #2c3440;
+    border-radius: 4px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.9);
+    overflow: hidden;
+    position: relative;
+    transform: scale(0.96);
+    transition: transform 0.2s ease;
+    display: flex;
+    flex-direction: column;
+}
+
+#lbrnd-modal-overlay.active #lbrnd-modal-container {
+    transform: scale(1);
+}
+
+/* --------------------------------------------------------------------------
+   3. Modal Header
+   -------------------------------------------------------------------------- */
+.lbrnd-modal-header {
+    padding: 14px 20px;
+    background: #1e252b;
+    border-bottom: 1px solid #2c3440;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.lbrnd-header-title-box {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.lbrnd-letterboxd-dots {
+    display: flex;
+    gap: 4px;
+}
+
+.lbrnd-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+}
+.lbrnd-dot-orange { background: #ff8000; }
+.lbrnd-dot-green { background: #00e054; }
+.lbrnd-dot-cyan { background: #40bcf4; }
+
+.lbrnd-header-title {
+    font-size: 14px;
+    font-weight: 700;
+    color: #ffffff;
+    margin: 0;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.lbrnd-header-subtitle {
+    font-size: 12px;
+    color: #667788;
+    margin: 0;
+}
+
+.lbrnd-header-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.lbrnd-btn-icon {
+    background: #283038;
+    border: 1px solid #38424d;
+    color: #99aabb;
+    width: 32px;
+    height: 32px;
+    border-radius: 3px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.15s ease;
+    padding: 0;
+}
+
+.lbrnd-btn-icon:hover {
+    background: #34404c;
+    color: #ffffff;
+    border-color: #4b5866;
+}
+
+.lbrnd-btn-icon svg {
+    width: 16px;
+    height: 16px;
+    fill: currentColor;
+}
+
+/* --------------------------------------------------------------------------
+   4. Loading / Fetching State
+   -------------------------------------------------------------------------- */
+#lbrnd-loading-state {
+    padding: 50px 20px;
+    text-align: center;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 14px;
+    background: #14181c;
+}
+
+.lbrnd-spinner {
+    width: 36px;
+    height: 36px;
+    border: 3px solid #283038;
+    border-top-color: #00e054;
+    border-radius: 50%;
+    animation: lbrnd-spin 0.7s linear infinite;
+}
+
+@keyframes lbrnd-spin {
+    to { transform: rotate(360deg); }
+}
+
+.lbrnd-loading-text {
+    font-size: 13px;
+    font-weight: 600;
+    color: #ccd7e0;
+}
+
+.lbrnd-progress-bar-wrap {
+    width: 280px;
+    height: 6px;
+    background: #242c34;
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.lbrnd-progress-bar-fill {
+    height: 100%;
+    width: 0%;
+    background: #00e054;
+    border-radius: 3px;
+    transition: width 0.2s ease;
+}
+
+/* --------------------------------------------------------------------------
+   5. Roulette Viewport & Track
+   -------------------------------------------------------------------------- */
+#lbrnd-roulette-view {
+    padding: 28px 0 32px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    position: relative;
+    background: #111417;
+    overflow: hidden;
+}
+
+.lbrnd-case-viewport {
+    width: 100%;
+    height: 235px;
+    position: relative;
+    overflow: hidden;
+    background: #0c0e10;
+    border-top: 1px solid #242c34;
+    border-bottom: 1px solid #242c34;
+}
+
+/* Side shadows */
+.lbrnd-case-viewport::before,
+.lbrnd-case-viewport::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: 180px;
+    z-index: 10;
+    pointer-events: none;
+}
+
+.lbrnd-case-viewport::before {
+    left: 0;
+    background: linear-gradient(to right, #0c0e10 0%, rgba(12, 14, 16, 0.85) 40%, transparent 100%);
+}
+
+.lbrnd-case-viewport::after {
+    right: 0;
+    background: linear-gradient(to left, #0c0e10 0%, rgba(12, 14, 16, 0.85) 40%, transparent 100%);
+}
+
+/* Exact Center Indicator */
+.lbrnd-center-pointer {
+    position: absolute;
+    left: 50%;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: #00e054;
+    transform: translateX(-50%);
+    z-index: 20;
+    pointer-events: none;
+}
+
+.lbrnd-center-pointer::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 0;
+    height: 0;
+    border-left: 7px solid transparent;
+    border-right: 7px solid transparent;
+    border-top: 10px solid #00e054;
+}
+
+.lbrnd-center-pointer::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 0;
+    height: 0;
+    border-left: 7px solid transparent;
+    border-right: 7px solid transparent;
+    border-bottom: 10px solid #00e054;
+}
+
+/* Roulette Track: STRICT immutable measurements */
+.lbrnd-reel-track {
+    display: flex;
+    height: 100%;
+    position: absolute;
+    left: 50%;
+    top: 0;
+    transform: translateX(0px);
+    will-change: transform;
+    box-sizing: border-box;
+}
+
+/* Single Reel Card: fixed 140px width + 6px margins = 152px total slot */
+.lbrnd-reel-card {
+    width: 140px !important;
+    min-width: 140px !important;
+    max-width: 140px !important;
+    height: 210px;
+    margin: 12px 6px 0 6px !important;
+    background: #1e252b;
+    border-radius: 3px;
+    position: relative;
+    overflow: hidden;
+    flex: 0 0 140px !important;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 4px 10px rgba(0, 0, 0, 0.6);
+    border: 1px solid #2c3440;
+    box-sizing: border-box;
+}
+
+.lbrnd-reel-card img {
+    width: 100%;
+    height: 172px;
+    object-fit: cover;
+    background: #14181c;
+    display: block;
+}
+
+/* Fallback poster container if image is missing */
+.lbrnd-poster-fallback {
+    width: 100%;
+    height: 172px;
+    background: #1c2228;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 12px;
+    box-sizing: border-box;
+    text-align: center;
+    border-bottom: 1px solid #283038;
+}
+
+.lbrnd-poster-fallback-icon {
+    width: 24px;
+    height: 24px;
+    fill: #445566;
+    margin-bottom: 6px;
+}
+
+.lbrnd-poster-fallback-title {
+    font-size: 10px;
+    font-weight: 700;
+    color: #8899a6;
+    text-transform: uppercase;
+    line-height: 1.2;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+}
+
+.lbrnd-reel-card-info {
+    padding: 4px 8px;
+    height: 38px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    background: #181f25;
+    border-top: 1px solid #222a32;
+}
+
+.lbrnd-reel-card-title {
+    font-size: 11px;
+    font-weight: 700;
+    color: #e0e6ed;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.2;
+}
+
+.lbrnd-reel-card-year {
+    font-size: 10px;
+    color: #667788;
+}
+
+.lbrnd-reel-card.winner-highlight {
+    border-color: #00e054;
+    box-shadow: 0 0 16px rgba(0, 224, 84, 0.4);
+}
+
+/* --------------------------------------------------------------------------
+   6. Reveal View (Winner Film Card) - Clean Letterboxd Layout
+   -------------------------------------------------------------------------- */
+#lbrnd-reveal-view {
+    display: flex;
+    flex-direction: column;
+    padding: 24px 28px 28px;
+    animation: lbrnd-fade-in 0.25s ease forwards;
+    background: #14181c;
+}
+
+@keyframes lbrnd-fade-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+.lbrnd-winner-layout {
+    display: flex;
+    gap: 28px;
+}
+
+.lbrnd-winner-poster-box {
+    flex-shrink: 0;
+    width: 210px;
+    min-height: 315px;
+    background: #1e252b;
+    border-radius: 4px;
+    overflow: hidden;
+    border: 1px solid #303840;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.lbrnd-winner-poster {
+    width: 100%;
+    height: 315px;
+    object-fit: cover;
+    display: block;
+}
+
+.lbrnd-winner-poster-fallback {
+    width: 100%;
+    height: 315px;
+    background: #1e252b;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    text-align: center;
+    box-sizing: border-box;
+    gap: 12px;
+}
+
+.lbrnd-winner-poster-fallback span {
+    font-size: 13px;
+    font-weight: 700;
+    color: #99aabb;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+}
+
+.lbrnd-winner-details {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+}
+
+.lbrnd-meta-tags {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+}
+
+.lbrnd-tag-year {
+    color: #667788;
+    font-size: 13px;
+    font-weight: 700;
+}
+
+.lbrnd-tag-rating {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    background: #242c34;
+    color: #00e054;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.lbrnd-winner-title {
+    font-size: 24px;
+    font-weight: 800;
+    color: #ffffff;
+    margin: 0 0 4px;
+    line-height: 1.2;
+    letter-spacing: -0.3px;
+}
+
+.lbrnd-winner-director {
+    font-size: 13px;
+    color: #8899a6;
+    margin: 0 0 16px;
+}
+
+.lbrnd-winner-director strong {
+    color: #ccd7e0;
+    font-weight: 600;
+}
+
+.lbrnd-synopsis-section {
+    margin-bottom: 16px;
+}
+
+.lbrnd-section-label {
+    font-size: 11px;
+    text-transform: uppercase;
+    color: #667788;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    margin-bottom: 6px;
+}
+
+.lbrnd-synopsis-text {
+    font-size: 13px;
+    line-height: 1.55;
+    color: #99aabb;
+    margin: 0;
+    max-height: 95px;
+    overflow-y: auto;
+    padding-right: 6px;
+}
+
+.lbrnd-synopsis-text::-webkit-scrollbar {
+    width: 4px;
+}
+.lbrnd-synopsis-text::-webkit-scrollbar-thumb {
+    background: #33404c;
+    border-radius: 2px;
+}
+
+.lbrnd-cast-section {
+    margin-bottom: 20px;
+}
+
+.lbrnd-cast-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    max-height: 60px;
+    overflow-y: auto;
+}
+
+.lbrnd-cast-chip {
+    background: #202830;
+    border: 1px solid #2c3440;
+    color: #99aabb;
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 3px;
+    font-weight: 500;
+}
+
+/* --------------------------------------------------------------------------
+   7. Action Buttons (Style Letterboxd)
+   -------------------------------------------------------------------------- */
+.lbrnd-actions-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: auto;
+    padding-top: 14px;
+    border-top: 1px solid #242c34;
+}
+
+.lbrnd-btn-primary {
+    background: #00b040;
+    color: #ffffff;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 10px 18px;
+    border-radius: 3px;
+    text-decoration: none;
+    border: none;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: background 0.15s ease;
+}
+
+.lbrnd-btn-primary:hover {
+    background: #00e054;
+    color: #ffffff;
+}
+
+.lbrnd-btn-secondary {
+    background: #303840;
+    color: #ffffff;
+    font-size: 12px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 10px 16px;
+    border-radius: 3px;
+    border: 1px solid #404c58;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    transition: background 0.15s ease;
+}
+
+.lbrnd-btn-secondary:hover {
+    background: #404c58;
+}
+
+.lbrnd-btn-secondary svg,
+.lbrnd-btn-primary svg {
+    width: 14px;
+    height: 14px;
+    fill: currentColor;
+}
+
+/* --------------------------------------------------------------------------
+   8. Responsive Adjustments
+   -------------------------------------------------------------------------- */
+@media (max-width: 768px) {
+    #lbrnd-modal-container {
+        width: 95%;
+        max-height: 90vh;
+        overflow-y: auto;
+    }
+    .lbrnd-winner-layout {
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+        gap: 16px;
+    }
+    .lbrnd-winner-poster-box {
+        width: 150px;
+        min-height: 225px;
+    }
+    .lbrnd-winner-poster {
+        height: 225px;
+    }
+    .lbrnd-meta-tags {
+        justify-content: center;
+    }
+    .lbrnd-cast-chips {
+        justify-content: center;
+    }
+    .lbrnd-actions-row {
+        flex-direction: column;
+        width: 100%;
+    }
+    .lbrnd-btn-primary, .lbrnd-btn-secondary {
+        width: 100%;
+        justify-content: center;
+    }
+}
