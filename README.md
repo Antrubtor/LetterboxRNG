@@ -1,6 +1,21 @@
-# 🎲 Letterboxd Watchlist Picker
+# 🎲 Letterboxd Companion (Watchlist Picker & Diary Stats)
 
-A sleek, lightweight browser extension designed with **Letterboxd's authentic UI** that picks a random movie from any watchlist with a smooth carousel animation.
+A sleek, lightweight browser extension designed with **Letterboxd's authentic UI** that picks random movies from any watchlist with a smooth carousel animation, and visualizes your diary activity with GitHub-style heatmaps and comprehensive viewing statistics.
+
+---
+
+## ✨ Features
+
+- 🎲 **Watchlist Random Picker**:
+  - Discreet floating dice button on any watchlist page (`/watchlist/`).
+  - Smooth animated roulette carousel reel with authentic mechanical clicking sound effects.
+  - Winner reveal card with high-resolution poster, synopsis, director, cast, and Letterboxd rating.
+- 📊 **Diary Statistics & Activity Heatmap**:
+  - Statistics button on any diary page (annual e.g. `/diary/for/2026/` or all-time `/diary/`).
+  - **GitHub-style Viewing Activity Heatmap**: 5-tier green color scale with hover tooltips detailing logged films for each day.
+  - **All-Time Multi-Year Timeline**: Continuous calendar spanning your entire diary history with smooth horizontal scrolling and year markers.
+  - **Summary Metrics**: Total Films Logged (and per-week average), Active Days (% of year / overall), **Longest Streak** (consecutive days with exact date range), Daily Record, and Top Month.
+  - **Viewing Distribution**: Interactive bar charts toggling between weekday distribution (Monday to Sunday) and monthly trends (January to December).
 
 ---
 
@@ -14,6 +29,9 @@ A sleek, lightweight browser extension designed with **Letterboxd's authentic UI
 
 ### 3. Movie Details Modal
 ![Movie Reveal](screenshots/3-movie-details.png)
+
+### 4. Diary Activity Heatmap & Statistics
+![Diary Statistics](screenshots/4-stats.png)
 
 ---
 
