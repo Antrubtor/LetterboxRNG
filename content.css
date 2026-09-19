@@ -1,9 +1,9 @@
 /* ==========================================================================
-   Letterboxd Watchlist Picker - Style Officiel Letterboxd
+   Letterboxd Watchlist Picker - Official Letterboxd Design
    ========================================================================== */
 
 /* --------------------------------------------------------------------------
-   1. Floating Action Button (Style Letterboxd)
+   1. Floating Action Button (Letterboxd Design)
    -------------------------------------------------------------------------- */
 #lbrnd-dice-btn {
     position: fixed;
@@ -43,7 +43,7 @@
     display: block;
 }
 
-/* Tooltip style Letterboxd */
+/* Letterboxd-style Tooltip */
 #lbrnd-dice-tooltip {
     position: absolute;
     left: 60px;
@@ -617,7 +617,7 @@
 }
 
 /* --------------------------------------------------------------------------
-   7. Action Buttons (Style Letterboxd)
+   7. Action Buttons (Letterboxd Design)
    -------------------------------------------------------------------------- */
 .lbrnd-actions-row {
     display: flex;
@@ -716,3 +716,670 @@
         justify-content: center;
     }
 }
+
+/* ==========================================================================
+   Letterboxd Diary Statistics Styles
+   ========================================================================== */
+
+/* --------------------------------------------------------------------------
+   1. Floating Action Button (Statistics)
+   -------------------------------------------------------------------------- */
+#lbst-stats-btn {
+    position: fixed;
+    bottom: 24px;
+    left: 24px;
+    width: 48px;
+    height: 48px;
+    border-radius: 4px;
+    background: #202830;
+    border: 1px solid #303840;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+    cursor: pointer;
+    z-index: 999999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+    outline: none;
+    user-select: none;
+    padding: 0;
+}
+
+#lbst-stats-btn:hover {
+    background: #283038;
+    border-color: #00e054;
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.75);
+}
+
+#lbst-stats-btn:active {
+    transform: translateY(0);
+}
+
+#lbst-stats-btn svg {
+    width: 26px;
+    height: 26px;
+    display: block;
+}
+
+#lbst-stats-tooltip {
+    position: absolute;
+    left: 60px;
+    background: #14181c;
+    color: #99aabb;
+    padding: 6px 12px;
+    border-radius: 3px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    white-space: nowrap;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.7);
+    border: 1px solid #303840;
+    pointer-events: none;
+    opacity: 0;
+    transform: translateX(-4px);
+    transition: opacity 0.15s ease, transform 0.15s ease;
+}
+
+#lbst-stats-tooltip::before {
+    content: '';
+    position: absolute;
+    left: -4px;
+    top: 50%;
+    transform: translateY(-50%) rotate(45deg);
+    width: 7px;
+    height: 7px;
+    background: #14181c;
+    border-left: 1px solid #303840;
+    border-bottom: 1px solid #303840;
+}
+
+#lbst-stats-btn:hover #lbst-stats-tooltip {
+    opacity: 1;
+    transform: translateX(0);
+    color: #ffffff;
+}
+
+/* --------------------------------------------------------------------------
+   2. Statistics Modal Overlay & Container
+   -------------------------------------------------------------------------- */
+#lbst-modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(10, 13, 16, 0.88);
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    z-index: 10000000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s ease;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    color: #99aabb;
+    box-sizing: border-box;
+    padding: 16px;
+}
+
+#lbst-modal-overlay.active {
+    opacity: 1;
+    pointer-events: auto;
+}
+
+#lbst-modal-container {
+    width: 100%;
+    max-width: 920px;
+    max-height: 90vh;
+    background: #14181c;
+    border: 1px solid #2c3440;
+    border-radius: 6px;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.9);
+    position: relative;
+    transform: scale(0.96);
+    transition: transform 0.2s ease;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+#lbst-modal-overlay.active #lbst-modal-container {
+    transform: scale(1);
+}
+
+.lbst-modal-header {
+    padding: 14px 20px;
+    background: #1e252b;
+    border-bottom: 1px solid #2c3440;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+}
+
+.lbst-header-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.lbst-year-select {
+    background: #202830;
+    color: #00e054;
+    border: 1px solid #303840;
+    border-radius: 3px;
+    padding: 4px 8px;
+    font-size: 12px;
+    font-weight: 700;
+    font-family: inherit;
+    cursor: pointer;
+    outline: none;
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.lbst-year-select:hover,
+.lbst-year-select:focus {
+    border-color: #00e054;
+    background: #283038;
+}
+
+.lbst-year-select option {
+    background: #14181c;
+    color: #ffffff;
+}
+
+.lbst-header-title-box {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.lbst-header-title {
+    font-size: 16px;
+    font-weight: 700;
+    color: #ffffff;
+    margin: 0;
+    letter-spacing: 0.02em;
+}
+
+.lbst-header-subtitle {
+    font-size: 12px;
+    color: #667788;
+    margin: 2px 0 0 0;
+}
+
+.lbst-modal-body {
+    padding: 24px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 28px;
+}
+
+/* Custom slim scrollbar */
+.lbst-modal-body::-webkit-scrollbar {
+    width: 6px;
+}
+.lbst-modal-body::-webkit-scrollbar-track {
+    background: #14181c;
+}
+.lbst-modal-body::-webkit-scrollbar-thumb {
+    background: #2c3440;
+    border-radius: 3px;
+}
+.lbst-modal-body::-webkit-scrollbar-thumb:hover {
+    background: #445566;
+}
+
+/* --------------------------------------------------------------------------
+   3. Loading & Error States
+   -------------------------------------------------------------------------- */
+#lbst-loading-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 60px 20px;
+    gap: 16px;
+    min-height: 260px;
+}
+
+.lbst-spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid #2c3440;
+    border-top: 3px solid #00e054;
+    border-radius: 50%;
+    animation: lbst-spin 0.8s linear infinite;
+}
+
+@keyframes lbst-spin {
+    to { transform: rotate(360deg); }
+}
+
+.lbst-loading-text {
+    font-size: 13px;
+    color: #8899aa;
+    text-align: center;
+}
+
+.lbst-progress-bar-wrap {
+    width: 260px;
+    height: 4px;
+    background: #202830;
+    border-radius: 2px;
+    overflow: hidden;
+    margin-top: 4px;
+}
+
+.lbst-progress-bar-fill {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, #00e054, #40bcf4);
+    border-radius: 2px;
+    transition: width 0.25s ease;
+}
+
+/* --------------------------------------------------------------------------
+   4. Summary Metrics Bar
+   -------------------------------------------------------------------------- */
+.lbst-metrics-grid {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
+    gap: 12px;
+}
+
+.lbst-metric-card {
+    background: #192026;
+    border: 1px solid #28323c;
+    border-radius: 4px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.lbst-metric-label {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #667788;
+}
+
+.lbst-metric-value {
+    font-size: 22px;
+    font-weight: 700;
+    color: #ffffff;
+    line-height: 1.1;
+}
+
+.lbst-metric-sub {
+    font-size: 11px;
+    color: #00e054;
+    margin-top: 2px;
+}
+
+/* --------------------------------------------------------------------------
+   5. GitHub-like Heatmap Grid
+   -------------------------------------------------------------------------- */
+.lbst-section {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.lbst-section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.lbst-section-title {
+    font-size: 13px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #c0d0e0;
+    margin: 0;
+}
+
+.lbst-heatmap-card {
+    background: #192026;
+    border: 1px solid #28323c;
+    border-radius: 4px;
+    padding: 16px 18px;
+    overflow-x: auto;
+}
+
+.lbst-heatmap-wrapper {
+    display: inline-flex;
+    flex-direction: column;
+    min-width: 100%;
+}
+
+/* Months Row */
+.lbst-months-row {
+    display: flex;
+    margin-left: 28px;
+    height: 18px;
+    position: relative;
+    margin-bottom: 6px;
+    user-select: none;
+}
+
+.lbst-month-label {
+    position: absolute;
+    font-size: 10px;
+    font-weight: 600;
+    color: #667788;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    white-space: nowrap;
+}
+
+.lbst-month-label.is-year {
+    color: #00e054;
+    font-weight: 700;
+}
+
+/* Grid & Weekday labels */
+.lbst-grid-container {
+    display: flex;
+    gap: 6px;
+}
+
+.lbst-days-col {
+    position: sticky;
+    left: 0;
+    background: #192026;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    height: 102px; /* 7 cells * 12px + 6 gaps * 3px = 102px */
+    width: 22px;
+    padding-top: 1px;
+    user-select: none;
+}
+
+.lbst-day-label {
+    font-size: 9px;
+    font-weight: 600;
+    color: #667788;
+    line-height: 12px;
+    height: 12px;
+}
+
+.lbst-weeks-track {
+    display: flex;
+    gap: 3px;
+}
+
+.lbst-week-col {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.lbst-day-cell {
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+    cursor: pointer;
+    transition: transform 0.1s ease, outline-color 0.1s ease;
+    box-sizing: border-box;
+}
+
+.lbst-day-cell:hover {
+    outline: 1.5px solid #ffffff;
+    transform: scale(1.2);
+    z-index: 10;
+}
+
+/* 5-tier intensity color scale (lighter green for higher viewing activity) */
+.lbst-cell-lvl-0 {
+    background: #182026;
+    border: 1px solid #202b33;
+}
+.lbst-cell-lvl-1 {
+    background: #0e4429;
+    border: 1px solid #135d37;
+}
+.lbst-cell-lvl-2 {
+    background: #006d32;
+    border: 1px solid #00873d;
+}
+.lbst-cell-lvl-3 {
+    background: #26a641;
+    border: 1px solid #2ec24d;
+}
+.lbst-cell-lvl-4 {
+    background: #00e054;
+    border: 1px solid #57f287;
+    box-shadow: 0 0 6px rgba(0, 224, 84, 0.4);
+}
+
+.lbst-cell-empty {
+    visibility: hidden;
+    pointer-events: none;
+}
+
+/* Legend */
+.lbst-heatmap-footer {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    margin-top: 12px;
+    font-size: 11px;
+    color: #667788;
+    user-select: none;
+}
+
+.lbst-legend-cells {
+    display: flex;
+    gap: 3px;
+    align-items: center;
+}
+
+.lbst-legend-cell {
+    width: 11px;
+    height: 11px;
+    border-radius: 2px;
+}
+
+/* --------------------------------------------------------------------------
+   6. Bar Chart Section & Toggle
+   -------------------------------------------------------------------------- */
+.lbst-toggle-group {
+    display: inline-flex;
+    background: #14181c;
+    border: 1px solid #2c3440;
+    border-radius: 3px;
+    padding: 2px;
+    gap: 2px;
+}
+
+.lbst-toggle-btn {
+    background: transparent;
+    border: none;
+    color: #8899aa;
+    padding: 5px 14px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    border-radius: 2px;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease;
+    outline: none;
+}
+
+.lbst-toggle-btn:hover {
+    color: #ffffff;
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.lbst-toggle-btn.active {
+    background: #283038;
+    color: #00e054;
+}
+
+.lbst-chart-card {
+    background: #192026;
+    border: 1px solid #28323c;
+    border-radius: 4px;
+    padding: 20px 24px 16px 24px;
+}
+
+.lbst-chart-container {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    height: 170px;
+    gap: 10px;
+    padding-bottom: 24px;
+    position: relative;
+    border-bottom: 1px solid #28323c;
+}
+
+.lbst-chart-bar-group {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    height: 100%;
+    justify-content: flex-end;
+    position: relative;
+    cursor: pointer;
+}
+
+.lbst-bar-value {
+    font-size: 11px;
+    font-weight: 700;
+    color: #ffffff;
+    margin-bottom: 6px;
+    transition: color 0.15s ease;
+    line-height: 1;
+}
+
+.lbst-bar-track {
+    width: 100%;
+    max-width: 44px;
+    height: 100%;
+    display: flex;
+    align-items: flex-end;
+}
+
+.lbst-bar-fill {
+    width: 100%;
+    background: linear-gradient(180deg, #00e054 0%, #009939 100%);
+    border-radius: 3px 3px 0 0;
+    height: 0;
+    transition: height 0.4s cubic-bezier(0.16, 1, 0.3, 1), background 0.15s ease, filter 0.15s ease;
+    position: relative;
+}
+
+.lbst-chart-bar-group:hover .lbst-bar-fill {
+    background: linear-gradient(180deg, #57f287 0%, #00e054 100%);
+    filter: brightness(1.15);
+}
+
+.lbst-chart-bar-group:hover .lbst-bar-value {
+    color: #00e054;
+}
+
+.lbst-bar-label {
+    position: absolute;
+    bottom: -22px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #8899aa;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+    transition: color 0.15s ease;
+}
+
+.lbst-chart-bar-group:hover .lbst-bar-label {
+    color: #ffffff;
+}
+
+/* --------------------------------------------------------------------------
+   7. Interactive Heatmap Tooltip
+   -------------------------------------------------------------------------- */
+#lbst-floating-tooltip {
+    position: fixed;
+    background: #11161b;
+    border: 1px solid #303d4a;
+    border-radius: 4px;
+    padding: 8px 12px;
+    color: #ffffff;
+    font-size: 12px;
+    pointer-events: none;
+    z-index: 10000002;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.85);
+    max-width: 280px;
+    display: none;
+    line-height: 1.4;
+    transition: opacity 0.1s ease;
+}
+
+.lbst-tooltip-date {
+    font-weight: 700;
+    color: #8899aa;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: 2px;
+}
+
+.lbst-tooltip-count {
+    font-weight: 700;
+    color: #00e054;
+    margin-bottom: 4px;
+}
+
+.lbst-tooltip-films {
+    margin: 0;
+    padding-left: 14px;
+    font-size: 11px;
+    color: #ccddee;
+    max-height: 140px;
+    overflow-y: auto;
+}
+
+.lbst-tooltip-films li {
+    margin-top: 2px;
+}
+
+/* --------------------------------------------------------------------------
+   8. Responsive Adjustments for Stats Modal
+   -------------------------------------------------------------------------- */
+@media (max-width: 768px) {
+    #lbst-modal-container {
+        max-height: 95vh;
+    }
+    .lbst-modal-body {
+        padding: 16px;
+        gap: 20px;
+    }
+    .lbst-metrics-grid {
+        grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+    }
+    .lbst-chart-container {
+        height: 140px;
+        gap: 4px;
+    }
+    .lbst-bar-label {
+        font-size: 9px;
+    }
+}
+

@@ -1,6 +1,7 @@
-# 🎲 Letterboxd Watchlist Picker
+# 🎲 Letterboxd Companion (Watchlist Picker & Diary Stats)
 
-A sleek, lightweight browser extension designed with **Letterboxd's authentic UI** that picks a random movie from any watchlist with a smooth carousel animation.
+A sleek, lightweight browser extension designed with **Letterboxd's authentic UI** that picks random movies from any watchlist with a smooth carousel animation, and visualizes your diary activity with GitHub-style heatmaps and comprehensive viewing statistics.
+
 
 ---
 
@@ -14,6 +15,9 @@ A sleek, lightweight browser extension designed with **Letterboxd's authentic UI
 
 ### 3. Movie Details Modal
 ![Movie Reveal](screenshots/3-movie-details.png)
+
+### 4. Diary Activity Heatmap & Statistics
+![Diary Statistics](screenshots/4-stats.png)
 
 ---
 
