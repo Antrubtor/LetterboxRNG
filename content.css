@@ -1,5 +1,5 @@
 /* ==========================================================================
-   Letterboxd Watchlist Picker - Official Letterboxd Design
+   Letterboxd Companion - Official Letterboxd Design
    ========================================================================== */
 
 /* --------------------------------------------------------------------------
@@ -1354,6 +1354,23 @@
     color: #ccddee;
     max-height: 140px;
     overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+#lbst-floating-tooltip.is-pinned {
+    pointer-events: auto;
+    border-color: #00e054;
+}
+
+.lbst-tooltip-hint {
+    margin-top: 6px;
+    font-size: 10px;
+    color: #667788;
+}
+
+.lbst-day-cell.is-pinned {
+    outline: 1.5px solid #00e054;
+    transform: scale(1.2);
 }
 
 .lbst-tooltip-films li {

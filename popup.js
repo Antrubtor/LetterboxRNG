@@ -2,25 +2,12 @@
 document.addEventListener('DOMContentLoaded', () => {
     const toggleSound = document.getElementById('toggle-sound');
 
-    // Load saved sound preference
-    const soundEnabled = localStorage.getItem('lbrnd_sound') !== 'false';
-    toggleSound.checked = soundEnabled;
+    // Sound preference lives in extension storage so content scripts on letterboxd.com can read it
+    chrome.storage.local.get('lbrnd_sound', (res) => {
+        toggleSound.checked = res.lbrnd_sound !== false;
+    });
 
     toggleSound.addEventListener('change', () => {
-        const isEnabled = toggleSound.checked;
-        localStorage.setItem('lbrnd_sound', isEnabled ? 'true' : 'false');
-        
-        // Broadcast to current tab if available
-        if (typeof chrome !== 'undefined' && chrome.tabs) {
-            chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-                if (tabs[0]?.id) {
-                    chrome.scripting?.executeScript?.({
-                        target: { tabId: tabs[0].id },
-                        func: (val) => { localStorage.setItem('lbrnd_sound', val ? 'true' : 'false'); },
-                        args: [isEnabled]
-                    }).catch(() => {});
-                }
-            });
-        }
+        chrome.storage.local.set({ lbrnd_sound: toggleSound.checked });
     });
 });

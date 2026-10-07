@@ -1,5 +1,5 @@
 /**
- * Letterboxd Random Watchlist Picker
+ * Letterboxd Companion (Watchlist Picker & Diary Stats)
  * Authentic Letterboxd Design • Cross-browser (Chrome, Safari, Firefox, Edge, Brave)
  */
 
@@ -17,6 +17,30 @@
     let audioCtx = null;
     let soundEnabled = localStorage.getItem('lbrnd_sound') !== 'false';
     let currentWinnerIndex = -1;
+
+    /**
+     * Sound preference shared with the popup through extension storage
+     * (the popup's localStorage lives on the extension origin, not on letterboxd.com)
+     */
+    const extStorage = (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) ? chrome.storage.local : null;
+
+    function applySoundSetting(enabled) {
+        soundEnabled = enabled;
+        localStorage.setItem('lbrnd_sound', enabled ? 'true' : 'false');
+        const icon = document.getElementById('lbrnd-sound-icon');
+        if (icon) icon.textContent = enabled ? '🔊' : '🔇';
+    }
+
+    if (extStorage) {
+        extStorage.get('lbrnd_sound', (res) => {
+            if (res && typeof res.lbrnd_sound === 'boolean') applySoundSetting(res.lbrnd_sound);
+        });
+        chrome.storage.onChanged.addListener((changes, area) => {
+            if (area === 'local' && changes.lbrnd_sound && typeof changes.lbrnd_sound.newValue === 'boolean') {
+                applySoundSetting(changes.lbrnd_sound.newValue);
+            }
+        });
+    }
 
     // Strict immutable layout dimensions
     const CARD_WIDTH = 140;
@@ -643,9 +667,8 @@
 
         const soundBtn = document.getElementById('lbrnd-sound-toggle');
         soundBtn.addEventListener('click', () => {
-            soundEnabled = !soundEnabled;
-            localStorage.setItem('lbrnd_sound', soundEnabled ? 'true' : 'false');
-            document.getElementById('lbrnd-sound-icon').textContent = soundEnabled ? '🔊' : '🔇';
+            applySoundSetting(!soundEnabled);
+            extStorage?.set({ lbrnd_sound: soundEnabled });
         });
 
         document.getElementById('lbrnd-reroll-btn').addEventListener('click', () => {
@@ -1124,7 +1147,7 @@
     }
 
     /**
-     * Fetch complete diary across pagination (capped at 20 pages max for efficiency)
+     * Fetch complete diary across pagination (fetched in batches of 5 pages)
      */
     async function fetchEntireDiary(customBasePath, fallbackYear, onProgress) {
         const ctx = getDiaryContext();
@@ -1163,9 +1186,8 @@
         if (totalPages > 1) {
             onProgress?.(1, totalPages, allEntries.length);
 
-            const maxPagesToFetch = Math.min(totalPages, 20);
             const remainingPages = [];
-            for (let p = 2; p <= maxPagesToFetch; p++) {
+            for (let p = 2; p <= totalPages; p++) {
                 remainingPages.push(p);
             }
 
@@ -1189,7 +1211,7 @@
                     allEntries = allEntries.concat(pageEntries);
                 });
 
-                const loadedPages = Math.min(i + BATCH_SIZE + 1, maxPagesToFetch);
+                const loadedPages = Math.min(i + BATCH_SIZE + 1, totalPages);
                 onProgress?.(loadedPages, totalPages, allEntries.length);
             }
         }
@@ -1325,10 +1347,16 @@
             weeks.push(currentWeek);
         }
 
+        // Averages only count days that have already happened (current year is still in progress)
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const spanEnd = endDate < today ? endDate : today;
+        const elapsedDays = Math.round((spanEnd - startDate) / 86400000) + 1;
+        const totalSpanDays = Math.max(1, Math.min(totalCalendarDays, elapsedDays));
+
         const activeDaysCount = Object.keys(dateFilmMap).length;
-        const totalSpanDays = Math.max(1, totalCalendarDays);
         const activePercentage = Math.round((activeDaysCount / totalSpanDays) * 100);
-        const totalWeeks = Math.max(1, isAllTime ? weeks.length : 52);
+        const totalWeeks = Math.max(1, totalSpanDays / 7);
         const avgPerWeek = (targetEntries.length / totalWeeks).toFixed(1);
 
         // 5. Longest consecutive days streak calculation
@@ -1616,7 +1644,12 @@
         document.getElementById('lbst-modal-close').addEventListener('click', closeStatsModal);
         overlay.addEventListener('click', (e) => {
             if (e.target === overlay) closeStatsModal();
+            else unpinTooltip();
         });
+
+        // A pinned tooltip is fixed-positioned: drop it when the content under it scrolls away
+        document.getElementById('lbst-content-view').addEventListener('scroll', unpinTooltip);
+        overlay.querySelector('.lbst-heatmap-card').addEventListener('scroll', unpinTooltip);
 
         document.getElementById('lbst-toggle-days').addEventListener('click', () => {
             if (currentChartMode !== 'days') {
@@ -1643,7 +1676,8 @@
 
         window.addEventListener('keydown', (e) => {
             if (e.key === 'Escape' && overlay.classList.contains('active')) {
-                closeStatsModal();
+                if (pinnedTooltipCell) unpinTooltip();
+                else closeStatsModal();
             }
         });
     }
@@ -1666,8 +1700,7 @@
     function closeStatsModal() {
         const overlay = document.getElementById('lbst-modal-overlay');
         if (overlay) overlay.classList.remove('active');
-        const tooltip = document.getElementById('lbst-floating-tooltip');
-        if (tooltip) tooltip.style.display = 'none';
+        unpinTooltip();
     }
 
     async function loadAndRenderStats(ctx) {
@@ -1743,7 +1776,8 @@
         const isAllTime = (currentSelectedYear === 'all');
 
         // If 'all' was selected but we originally only fetched a single year page (/for/YYYY/), fetch full diary
-        if (isAllTime && ctx && ctx.urlYear && cachedDiaryPath !== `/${ctx.username}/diary/::null`) {
+        const fullDiaryPath = ctx ? ctx.baseUrl.replace(/for\/.*$/i, '') : '';
+        if (isAllTime && ctx && ctx.urlYear && cachedDiaryPath !== `${fullDiaryPath}::null`) {
             const loadingView = document.getElementById('lbst-loading-state');
             const contentView = document.getElementById('lbst-content-view');
             const statusText = document.getElementById('lbst-loading-status');
@@ -1754,7 +1788,7 @@
             progressFill.style.width = '20%';
 
             try {
-                const fullEntries = await fetchEntireDiary(`/${ctx.username}/diary/`, null, (loaded, total, count) => {
+                const fullEntries = await fetchEntireDiary(fullDiaryPath, null, (loaded, total, count) => {
                     const percent = Math.round((loaded / total) * 100);
                     progressFill.style.width = `${Math.max(10, percent)}%`;
                     statusText.textContent = `Indexing full diary... (${count} films • Page ${loaded}/${total})`;
@@ -1808,22 +1842,51 @@
         renderStatsUI(stats);
     }
 
-    function positionFloatingTooltip(e) {
+    function escapeHtml(str) {
+        return String(str).replace(/[&<>"']/g, c => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        })[c]);
+    }
+
+    // Heatmap cell whose tooltip is pinned open by a click (lets the user scroll its film list)
+    let pinnedTooltipCell = null;
+
+    function placeTooltipAt(x, y) {
         const tooltip = document.getElementById('lbst-floating-tooltip');
         if (!tooltip || tooltip.style.display !== 'block') return;
 
-        let left = e.clientX + 14;
-        let top = e.clientY + 14;
+        const w = tooltip.offsetWidth;
+        const h = tooltip.offsetHeight;
 
-        if (left + 260 > window.innerWidth) {
-            left = e.clientX - 270;
+        let left = x + 14;
+        let top = y + 14;
+
+        if (left + w + 10 > window.innerWidth) {
+            left = x - w - 14;
         }
-        if (top + 160 > window.innerHeight) {
-            top = e.clientY - 170;
+        if (top + h + 10 > window.innerHeight) {
+            top = y - h - 14;
         }
 
         tooltip.style.left = `${Math.max(10, left)}px`;
         tooltip.style.top = `${Math.max(10, top)}px`;
+    }
+
+    function positionFloatingTooltip(e) {
+        if (pinnedTooltipCell) return;
+        placeTooltipAt(e.clientX, e.clientY);
+    }
+
+    function unpinTooltip() {
+        const tooltip = document.getElementById('lbst-floating-tooltip');
+        if (pinnedTooltipCell) {
+            pinnedTooltipCell.classList.remove('is-pinned');
+            pinnedTooltipCell = null;
+        }
+        if (tooltip) {
+            tooltip.classList.remove('is-pinned');
+            tooltip.style.display = 'none';
+        }
     }
 
     /**
@@ -1869,6 +1932,7 @@
 
         // 3. Heatmap Weeks Track
         const weeksTrack = document.getElementById('lbst-weeks-track');
+        unpinTooltip();
         weeksTrack.innerHTML = '';
         const tooltip = document.getElementById('lbst-floating-tooltip');
 
@@ -1887,30 +1951,56 @@
                     cell.className = `lbst-day-cell lbst-cell-lvl-${day.level}`;
                     cell.dataset.date = day.dateStr;
 
-                    cell.addEventListener('mouseenter', (e) => {
+                    const fillDayTooltip = (pinned) => {
                         const dateObj = day.dateObj;
                         const formattedDate = `${daysEn[dateObj.getDay()]}, ${monthsLongEn[dateObj.getMonth()]} ${dateObj.getDate()}, ${dateObj.getFullYear()}`;
 
                         let filmsHtml = '';
                         if (day.films && day.films.length > 0) {
-                            filmsHtml = `<ul class="lbst-tooltip-films">${day.films.map(f => `<li>${f}</li>`).join('')}</ul>`;
+                            filmsHtml = `<ul class="lbst-tooltip-films">${day.films.map(f => `<li>${escapeHtml(f)}</li>`).join('')}</ul>`;
                         }
 
                         const countText = day.count === 0 ? 'No films logged' : `${day.count} film${day.count === 1 ? '' : 's'} logged:`;
+                        const hintText = day.count > 0
+                            ? `<div class="lbst-tooltip-hint">${pinned ? 'Click elsewhere to close' : 'Click to pin'}</div>`
+                            : '';
 
                         tooltip.innerHTML = `
                             <div class="lbst-tooltip-date">${formattedDate}</div>
                             <div class="lbst-tooltip-count">${countText}</div>
                             ${filmsHtml}
+                            ${hintText}
                         `;
+                        tooltip.classList.toggle('is-pinned', pinned);
                         tooltip.style.display = 'block';
+                    };
+
+                    cell.addEventListener('mouseenter', (e) => {
+                        if (pinnedTooltipCell) return;
+                        fillDayTooltip(false);
                         positionFloatingTooltip(e);
                     });
 
                     cell.addEventListener('mousemove', positionFloatingTooltip);
 
                     cell.addEventListener('mouseleave', () => {
-                        tooltip.style.display = 'none';
+                        if (!pinnedTooltipCell) tooltip.style.display = 'none';
+                    });
+
+                    // Click pins the tooltip so its film list can be scrolled
+                    cell.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        if (pinnedTooltipCell === cell) {
+                            unpinTooltip();
+                            return;
+                        }
+                        unpinTooltip();
+                        if (day.count === 0) return;
+                        pinnedTooltipCell = cell;
+                        cell.classList.add('is-pinned');
+                        fillDayTooltip(true);
+                        const rect = cell.getBoundingClientRect();
+                        placeTooltipAt(rect.right - 6, rect.bottom - 6);
                     });
                 }
                 col.appendChild(cell);
@@ -1978,6 +2068,7 @@
             group.appendChild(labelEl);
 
             group.addEventListener('mouseenter', (e) => {
+                if (pinnedTooltipCell) return;
                 tooltip.innerHTML = `
                     <div class="lbst-tooltip-date">${item.name}</div>
                     <div class="lbst-tooltip-count">${item.count} film${item.count === 1 ? '' : 's'} (${pct}% of total)</div>
@@ -1989,7 +2080,7 @@
             group.addEventListener('mousemove', positionFloatingTooltip);
 
             group.addEventListener('mouseleave', () => {
-                tooltip.style.display = 'none';
+                if (!pinnedTooltipCell) tooltip.style.display = 'none';
             });
 
             container.appendChild(group);
