@@ -2149,50 +2149,91 @@
     }
 
     /**
-     * Logged-in member, read from the page's inline `person = { username: "..." }` script
+     * Logged-in member. The page first declares `person = { username: "" }` as a default,
+     * then a later inline script sets `person.username = "Name"` when signed in.
      */
     function getLoggedInUsername() {
+        let username = null;
         for (const script of document.querySelectorAll('script:not([src])')) {
-            const m = script.textContent.match(/person\s*=\s*\{\s*username:\s*"([^"]*)"/);
-            if (m) return m[1] ? m[1].toLowerCase() : null;
-        }
-        return null;
-    }
-
-    function getCsrfToken() {
-        let token = '';
-        for (const script of document.querySelectorAll('script:not([src])')) {
-            const re = /supermodelCSRF\s*=\s*['"]([^'"]*)['"]/g;
+            const re = /person(?:\s*=\s*\{\s*|\.)username\s*[:=]\s*"([^"]*)"/g;
             let m;
             while ((m = re.exec(script.textContent)) !== null) {
-                if (m[1]) token = m[1];
+                if (m[1]) username = m[1].toLowerCase();
             }
         }
-        return token || document.querySelector('input[name="__csrf"]')?.value || '';
+        return username;
     }
 
     /**
-     * Follow / unfollow a member as the logged-in user (same request as Letterboxd's own buttons)
+     * Follow / unfollow a member as the logged-in user.
+     * Rather than replaying the request, this clicks an off-screen copy of Letterboxd's own
+     * follow button: the site's handler adds the CSRF token and solves the captcha that
+     * following may require, then hides the clicked button once it succeeds.
      */
-    async function setFollowState(member, follow) {
-        const action = (follow ? member.followAction : member.unfollowAction) ||
-                       `/${member.username}/${follow ? 'follow' : 'unfollow'}/`;
-        // Firefox: content.fetch sends the request as the page (Origin / cookies), Chrome's fetch already does
-        const pageFetch = (typeof content !== 'undefined' && content.fetch) ? content.fetch.bind(content) : fetch;
+    function setFollowState(member, follow) {
+        return new Promise((resolve, reject) => {
+            let host = document.getElementById('lbfl-native-actions');
+            if (!host) {
+                host = document.createElement('div');
+                host.id = 'lbfl-native-actions';
+                host.setAttribute('aria-hidden', 'true');
+                document.body.appendChild(host);
+            }
 
-        const res = await pageFetch(new URL(action, window.location.origin).href, {
-            method: 'POST',
-            credentials: 'same-origin',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-            body: new URLSearchParams({ __csrf: getCsrfToken() }).toString()
+            const wrapper = document.createElement('div');
+            wrapper.className = 'follow-button-wrapper js-follow-button-wrapper';
+            wrapper.dataset.username = member.username;
+
+            const unfollowLink = document.createElement('a');
+            unfollowLink.href = '#';
+            unfollowLink.className = 'ajax-click-action button -compact -following js-button-following';
+            unfollowLink.dataset.action = member.unfollowAction || `/${member.username}/unfollow/`;
+            unfollowLink.innerHTML = '<span class="button-text">Following</span>';
+
+            const followLink = document.createElement('a');
+            followLink.href = '#';
+            followLink.className = 'ajax-click-action button -compact -follow js-button-follow';
+            followLink.dataset.action = member.followAction || `/${member.username}/follow/`;
+            followLink.dataset.captchaAction = 'follow';
+            followLink.innerHTML = '<span class="button-text">Follow</span>';
+
+            (follow ? unfollowLink : followLink).hidden = true;
+            wrapper.appendChild(unfollowLink);
+            wrapper.appendChild(followLink);
+            host.appendChild(wrapper);
+
+            const target = follow ? followLink : unfollowLink;
+            let started = false;
+            let settled = false;
+
+            const finish = (ok) => {
+                if (settled) return;
+                settled = true;
+                observer.disconnect();
+                clearTimeout(timeout);
+                wrapper.remove();
+                if (ok) resolve();
+                else reject(new Error('Letterboxd refused the request (see the message at the top of the page).'));
+            };
+
+            // The site marks the button `ajax-disabled` while working and sets `hidden` on success
+            const observer = new MutationObserver(() => {
+                if (target.hidden) {
+                    finish(true);
+                } else if (target.classList.contains('ajax-disabled')) {
+                    started = true;
+                } else if (started) {
+                    // Work complete without hiding: give the success fade a moment before calling it a failure
+                    setTimeout(() => finish(target.hidden), 800);
+                }
+            });
+            observer.observe(target, { attributes: true, attributeFilter: ['class', 'hidden'] });
+
+            // Captcha can take a while; past this point assume it failed
+            const timeout = setTimeout(() => finish(target.hidden), 30000);
+
+            target.click();
         });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-        const data = await res.json().catch(() => null);
-        if (!data || !data.result) {
-            const msg = data && data.messages && data.messages.length ? data.messages.join(' ') : 'Request refused by Letterboxd.';
-            throw new Error(msg);
-        }
     }
 
     /**

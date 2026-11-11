@@ -1577,3 +1577,16 @@
     font-size: 13px;
     color: #8899aa;
 }
+
+/* Off-screen copies of Letterboxd's native follow buttons (clicked by the Follow / Unfollow actions).
+   Kept rendered (not display:none) so the site's fade animations complete normally. */
+#lbfl-native-actions {
+    position: fixed;
+    left: -10000px;
+    top: 0;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    opacity: 0;
+    pointer-events: none;
+}
