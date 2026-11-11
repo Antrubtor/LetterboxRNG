@@ -724,7 +724,8 @@
 /* --------------------------------------------------------------------------
    1. Floating Action Button (Statistics)
    -------------------------------------------------------------------------- */
-#lbst-stats-btn {
+#lbst-stats-btn,
+#lbfl-follow-btn {
     position: fixed;
     bottom: 24px;
     left: 24px;
@@ -745,24 +746,28 @@
     padding: 0;
 }
 
-#lbst-stats-btn:hover {
+#lbst-stats-btn:hover,
+#lbfl-follow-btn:hover {
     background: #283038;
     border-color: #00e054;
     transform: translateY(-2px);
     box-shadow: 0 6px 20px rgba(0, 0, 0, 0.75);
 }
 
-#lbst-stats-btn:active {
+#lbst-stats-btn:active,
+#lbfl-follow-btn:active {
     transform: translateY(0);
 }
 
-#lbst-stats-btn svg {
+#lbst-stats-btn svg,
+#lbfl-follow-btn svg {
     width: 26px;
     height: 26px;
     display: block;
 }
 
-#lbst-stats-tooltip {
+#lbst-stats-tooltip,
+#lbfl-follow-tooltip {
     position: absolute;
     left: 60px;
     background: #14181c;
@@ -783,7 +788,8 @@
     transition: opacity 0.15s ease, transform 0.15s ease;
 }
 
-#lbst-stats-tooltip::before {
+#lbst-stats-tooltip::before,
+#lbfl-follow-tooltip::before {
     content: '';
     position: absolute;
     left: -4px;
@@ -796,7 +802,8 @@
     border-bottom: 1px solid #303840;
 }
 
-#lbst-stats-btn:hover #lbst-stats-tooltip {
+#lbst-stats-btn:hover #lbst-stats-tooltip,
+#lbfl-follow-btn:hover #lbfl-follow-tooltip {
     opacity: 1;
     transform: translateX(0);
     color: #ffffff;
@@ -805,7 +812,8 @@
 /* --------------------------------------------------------------------------
    2. Statistics Modal Overlay & Container
    -------------------------------------------------------------------------- */
-#lbst-modal-overlay {
+#lbst-modal-overlay,
+#lbfl-modal-overlay {
     position: fixed;
     top: 0;
     left: 0;
@@ -827,12 +835,14 @@
     padding: 16px;
 }
 
-#lbst-modal-overlay.active {
+#lbst-modal-overlay.active,
+#lbfl-modal-overlay.active {
     opacity: 1;
     pointer-events: auto;
 }
 
-#lbst-modal-container {
+#lbst-modal-container,
+#lbfl-modal-container {
     width: 100%;
     max-width: 920px;
     max-height: 90vh;
@@ -848,7 +858,8 @@
     overflow: hidden;
 }
 
-#lbst-modal-overlay.active #lbst-modal-container {
+#lbst-modal-overlay.active #lbst-modal-container,
+#lbfl-modal-overlay.active #lbfl-modal-container {
     transform: scale(1);
 }
 
@@ -940,7 +951,8 @@
 /* --------------------------------------------------------------------------
    3. Loading & Error States
    -------------------------------------------------------------------------- */
-#lbst-loading-state {
+#lbst-loading-state,
+#lbfl-loading-state {
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -1381,7 +1393,8 @@
    8. Responsive Adjustments for Stats Modal
    -------------------------------------------------------------------------- */
 @media (max-width: 768px) {
-    #lbst-modal-container {
+    #lbst-modal-container,
+    #lbfl-modal-container {
         max-height: 95vh;
     }
     .lbst-modal-body {
@@ -1400,3 +1413,167 @@
     }
 }
 
+/* ==========================================================================
+   Letterboxd Follow Check Styles
+   (button, overlay, container and loading state share the Stats rules above)
+   ========================================================================== */
+
+#lbfl-modal-container {
+    max-width: 640px;
+    height: 80vh;
+}
+
+#lbfl-content-view {
+    flex: 1;
+    min-height: 0;
+    gap: 14px;
+}
+
+#lbfl-content-view .lbst-section-header {
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.lbfl-search {
+    flex: 1;
+    min-width: 160px;
+    max-width: 240px;
+    background: #202830;
+    color: #ffffff;
+    border: 1px solid #303840;
+    border-radius: 3px;
+    padding: 6px 10px;
+    font-size: 12px;
+    font-family: inherit;
+    outline: none;
+    transition: border-color 0.15s ease;
+}
+
+.lbfl-search:focus {
+    border-color: #00e054;
+}
+
+.lbfl-tab-desc {
+    margin: 0;
+    font-size: 12px;
+    color: #667788;
+}
+
+.lbfl-member-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 8px;
+}
+
+.lbfl-member {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    background: #192026;
+    border: 1px solid #28323c;
+    border-radius: 4px;
+    transition: border-color 0.15s ease, background 0.15s ease;
+    min-width: 0;
+}
+
+.lbfl-member:hover {
+    border-color: #00e054;
+    background: #1e262d;
+}
+
+.lbfl-member-link {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 1;
+    min-width: 0;
+    text-decoration: none;
+}
+
+.lbfl-action-btn {
+    flex-shrink: 0;
+    min-width: 78px;
+    padding: 5px 10px;
+    border-radius: 3px;
+    border: 1px solid transparent;
+    font-family: inherit;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    cursor: pointer;
+    transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.lbfl-action-btn.-follow {
+    background: #00b020;
+    color: #ffffff;
+}
+
+.lbfl-action-btn.-follow:hover {
+    background: #00c030;
+}
+
+.lbfl-action-btn.-unfollow {
+    background: transparent;
+    border-color: #445566;
+    color: #99aabb;
+}
+
+.lbfl-action-btn.-unfollow:hover {
+    background: #ee5544;
+    border-color: #ee5544;
+    color: #ffffff;
+}
+
+.lbfl-action-btn.-error {
+    background: #ee5544;
+    border-color: #ee5544;
+    color: #ffffff;
+}
+
+.lbfl-action-btn:disabled {
+    opacity: 0.6;
+    cursor: wait;
+}
+
+.lbfl-member-avatar {
+    width: 36px;
+    height: 36px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: #2c3440;
+    object-fit: cover;
+}
+
+.lbfl-member-info {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.lbfl-member-name {
+    font-size: 13px;
+    font-weight: 700;
+    color: #ffffff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.lbfl-member-handle {
+    font-size: 11px;
+    color: #667788;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.lbfl-empty {
+    grid-column: 1 / -1;
+    padding: 40px 0;
+    text-align: center;
+    font-size: 13px;
+    color: #8899aa;
+}

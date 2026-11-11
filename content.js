@@ -2094,19 +2094,490 @@
         });
     }
 
+    /* ==========================================================================
+       Letterboxd Follow Check (who doesn't follow back)
+       ========================================================================== */
+
+    const MEMBERS_PER_PAGE = 25;
+    const MAX_FOLLOW_LIST_SIZE = 5000; // 200 pages per list, beyond that the scan is too slow
+
+    let cachedFollowData = null; // { username, following: Map, followers: Map }
+    let isFetchingFollows = false;
+    let currentFollowTab = 'not-following-back'; // or 'not-followed-back'
+
+    /**
+     * Examples:
+     * - /antrubtor/following/
+     * - /antrubtor/followers/
+     * - /antrubtor/followers/by/name/page/2/
+     */
+    function isFollowPage() {
+        return /^\/[^\/]+\/(?:following|followers)(?:\/|$)/i.test(window.location.pathname);
+    }
+
+    function getFollowContext() {
+        const match = window.location.pathname.match(/^\/([^\/]+)\/(following|followers)(?:\/|$)/i);
+        if (!match) return null;
+        return {
+            username: match[1],
+            kind: match[2].toLowerCase()
+        };
+    }
+
+    function extractMembersFromDoc(doc) {
+        const members = [];
+        doc.querySelectorAll('table.member-table tbody tr, table.person-table tbody tr').forEach(row => {
+            const link = row.querySelector('a.name') || row.querySelector('.person-summary h3 a');
+            const href = link?.getAttribute('href') || '';
+            const m = href.match(/^\/([^\/]+)\/?$/);
+            if (!m) return;
+
+            const img = row.querySelector('a.avatar img, .avatar img');
+            // Native Follow / Following buttons (only rendered when logged in) carry the action endpoints
+            const followBtn = row.querySelector('.js-button-follow');
+            const unfollowBtn = row.querySelector('.js-button-following');
+            members.push({
+                username: m[1].toLowerCase(),
+                displayName: link.textContent.replace(/\s+/g, ' ').trim() || m[1],
+                avatar: img?.getAttribute('src') || '',
+                link: `https://letterboxd.com/${m[1]}/`,
+                followAction: followBtn?.getAttribute('data-action') || null,
+                unfollowAction: unfollowBtn?.getAttribute('data-action') || null
+            });
+        });
+        return members;
+    }
+
+    /**
+     * Logged-in member, read from the page's inline `person = { username: "..." }` script
+     */
+    function getLoggedInUsername() {
+        for (const script of document.querySelectorAll('script:not([src])')) {
+            const m = script.textContent.match(/person\s*=\s*\{\s*username:\s*"([^"]*)"/);
+            if (m) return m[1] ? m[1].toLowerCase() : null;
+        }
+        return null;
+    }
+
+    function getCsrfToken() {
+        let token = '';
+        for (const script of document.querySelectorAll('script:not([src])')) {
+            const re = /supermodelCSRF\s*=\s*['"]([^'"]*)['"]/g;
+            let m;
+            while ((m = re.exec(script.textContent)) !== null) {
+                if (m[1]) token = m[1];
+            }
+        }
+        return token || document.querySelector('input[name="__csrf"]')?.value || '';
+    }
+
+    /**
+     * Follow / unfollow a member as the logged-in user (same request as Letterboxd's own buttons)
+     */
+    async function setFollowState(member, follow) {
+        const action = (follow ? member.followAction : member.unfollowAction) ||
+                       `/${member.username}/${follow ? 'follow' : 'unfollow'}/`;
+        // Firefox: content.fetch sends the request as the page (Origin / cookies), Chrome's fetch already does
+        const pageFetch = (typeof content !== 'undefined' && content.fetch) ? content.fetch.bind(content) : fetch;
+
+        const res = await pageFetch(new URL(action, window.location.origin).href, {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
+            body: new URLSearchParams({ __csrf: getCsrfToken() }).toString()
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+        const data = await res.json().catch(() => null);
+        if (!data || !data.result) {
+            const msg = data && data.messages && data.messages.length ? data.messages.join(' ') : 'Request refused by Letterboxd.';
+            throw new Error(msg);
+        }
+    }
+
+    /**
+     * Total list size from the "Following" / "Followers" tab tooltip (e.g. title="80 people")
+     */
+    function detectFollowCount(doc, username, kind) {
+        const links = doc.querySelectorAll(`a[href="/${username}/${kind}/" i][title]`);
+        for (const a of links) {
+            const digits = (a.getAttribute('title') || '').replace(/[^\d]/g, '');
+            if (digits) return parseInt(digits, 10);
+        }
+        return null;
+    }
+
+    async function fetchFollowPage(url) {
+        const res = await fetch(url, { credentials: 'same-origin' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return new DOMParser().parseFromString(await res.text(), 'text/html');
+    }
+
+    /**
+     * Fetch every member of /user/following/ or /user/followers/
+     */
+    async function fetchMemberList(username, kind, onProgress) {
+        const basePath = `/${username}/${kind}/`;
+        const members = new Map();
+        const addAll = (list) => list.forEach(m => members.set(m.username, m));
+
+        const firstDoc = await fetchFollowPage(basePath);
+        addAll(extractMembersFromDoc(firstDoc));
+
+        const total = detectFollowCount(firstDoc, username, kind);
+        if (total !== null && total > MAX_FOLLOW_LIST_SIZE) {
+            throw new Error(`Too many ${kind} to compare (${total.toLocaleString('en-US')}, limit is ${MAX_FOLLOW_LIST_SIZE.toLocaleString('en-US')}).`);
+        }
+
+        if (total !== null) {
+            const totalPages = Math.ceil(total / MEMBERS_PER_PAGE);
+            onProgress?.(1, totalPages);
+
+            const BATCH_SIZE = 5;
+            for (let p = 2; p <= totalPages; p += BATCH_SIZE) {
+                const batch = [];
+                for (let n = p; n < p + BATCH_SIZE && n <= totalPages; n++) batch.push(n);
+                const docs = await Promise.all(batch.map(n => fetchFollowPage(`${basePath}page/${n}/`)));
+                docs.forEach(doc => addAll(extractMembersFromDoc(doc)));
+                onProgress?.(Math.min(p + BATCH_SIZE - 1, totalPages), totalPages);
+            }
+        } else {
+            // No count available: walk the "Next" links one page at a time
+            let doc = firstDoc;
+            let page = 1;
+            while (page < MAX_FOLLOW_LIST_SIZE / MEMBERS_PER_PAGE) {
+                const next = doc.querySelector('.pagination a.next, .paginate-nextprev a.next');
+                if (!next) break;
+                page++;
+                onProgress?.(page, null);
+                doc = await fetchFollowPage(next.getAttribute('href'));
+                addAll(extractMembersFromDoc(doc));
+            }
+        }
+
+        return members;
+    }
+
+    const SVG_FOLLOW_ICON = `
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none">
+            <circle cx="9" cy="8" r="3.5" stroke="#99aabb" stroke-width="1.8"/>
+            <path d="M2.5 19.5c0-3.6 2.9-6 6.5-6s6.5 2.4 6.5 6" stroke="#99aabb" stroke-width="1.8" stroke-linecap="round"/>
+            <path d="M16 8h6" stroke="#ff8000" stroke-width="2" stroke-linecap="round"/>
+            <path d="M16.5 12.5l2 2 3.5-4" stroke="#00e054" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+    `;
+
+    function injectFollowButton() {
+        if (document.getElementById('lbfl-follow-btn')) return;
+        const ctx = getFollowContext();
+        if (!ctx) return;
+
+        const tooltipText = ctx.kind === 'following' ? 'Not following back' : 'Not followed back';
+
+        const btn = document.createElement('button');
+        btn.id = 'lbfl-follow-btn';
+        btn.setAttribute('aria-label', tooltipText);
+        btn.innerHTML = `
+            ${SVG_FOLLOW_ICON}
+            <div id="lbfl-follow-tooltip">${tooltipText}</div>
+        `;
+        btn.addEventListener('click', openFollowModal);
+        document.body.appendChild(btn);
+    }
+
+    function removeFollowButton() {
+        document.getElementById('lbfl-follow-btn')?.remove();
+    }
+
+    function injectFollowModal() {
+        if (document.getElementById('lbfl-modal-overlay')) return;
+
+        const overlay = document.createElement('div');
+        overlay.id = 'lbfl-modal-overlay';
+        overlay.innerHTML = `
+            <div id="lbfl-modal-container">
+                <div class="lbst-modal-header">
+                    <div class="lbst-header-title-box">
+                        <div class="lbrnd-letterboxd-dots">
+                            <span class="lbrnd-dot lbrnd-dot-orange"></span>
+                            <span class="lbrnd-dot lbrnd-dot-green"></span>
+                            <span class="lbrnd-dot lbrnd-dot-cyan"></span>
+                        </div>
+                        <div>
+                            <h3 class="lbst-header-title">Follow Check</h3>
+                            <p class="lbst-header-subtitle" id="lbfl-header-sub">Loading...</p>
+                        </div>
+                    </div>
+                    <div class="lbst-header-controls">
+                        <button class="lbrnd-btn-icon" id="lbfl-modal-close" title="Close (Esc)">✕</button>
+                    </div>
+                </div>
+
+                <div id="lbfl-loading-state">
+                    <div class="lbst-spinner"></div>
+                    <div class="lbst-loading-text" id="lbfl-loading-status">Loading members...</div>
+                    <div class="lbst-progress-bar-wrap">
+                        <div class="lbst-progress-bar-fill" id="lbfl-progress-fill"></div>
+                    </div>
+                </div>
+
+                <div class="lbst-modal-body" id="lbfl-content-view" style="display: none;">
+                    <div class="lbst-section-header">
+                        <div class="lbst-toggle-group">
+                            <button class="lbst-toggle-btn" data-tab="not-following-back" id="lbfl-tab-not-following-back"></button>
+                            <button class="lbst-toggle-btn" data-tab="not-followed-back" id="lbfl-tab-not-followed-back"></button>
+                        </div>
+                        <input type="search" class="lbfl-search" id="lbfl-search" placeholder="Filter by name..." autocomplete="off">
+                    </div>
+                    <p class="lbfl-tab-desc" id="lbfl-tab-desc"></p>
+                    <div class="lbfl-member-list" id="lbfl-member-list"></div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        document.getElementById('lbfl-modal-close').addEventListener('click', closeFollowModal);
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) closeFollowModal();
+        });
+
+        overlay.querySelectorAll('.lbst-toggle-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                currentFollowTab = btn.dataset.tab;
+                renderFollowResults();
+            });
+        });
+
+        document.getElementById('lbfl-search').addEventListener('input', renderFollowResults);
+
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && overlay.classList.contains('active')) {
+                closeFollowModal();
+            }
+        });
+    }
+
+    function openFollowModal() {
+        const ctx = getFollowContext();
+        if (!ctx) return;
+
+        injectFollowModal();
+        document.getElementById('lbfl-modal-overlay').classList.add('active');
+
+        // Default tab matches the page: /following/ -> who doesn't follow back, /followers/ -> who isn't followed back
+        currentFollowTab = ctx.kind === 'following' ? 'not-following-back' : 'not-followed-back';
+        document.getElementById('lbfl-search').value = '';
+
+        loadFollowData(ctx.username);
+    }
+
+    function closeFollowModal() {
+        document.getElementById('lbfl-modal-overlay')?.classList.remove('active');
+    }
+
+    async function loadFollowData(username) {
+        const loadingView = document.getElementById('lbfl-loading-state');
+        const contentView = document.getElementById('lbfl-content-view');
+        const statusText = document.getElementById('lbfl-loading-status');
+        const progressFill = document.getElementById('lbfl-progress-fill');
+        const subEl = document.getElementById('lbfl-header-sub');
+
+        if (cachedFollowData && cachedFollowData.username === username.toLowerCase()) {
+            loadingView.style.display = 'none';
+            contentView.style.display = 'flex';
+            renderFollowResults();
+            return;
+        }
+        if (isFetchingFollows) return;
+        isFetchingFollows = true;
+
+        loadingView.style.display = 'flex';
+        contentView.style.display = 'none';
+        progressFill.style.width = '5%';
+        subEl.textContent = `@${username} • Comparing following and followers...`;
+
+        // Following counts as the first half of the bar, followers as the second half
+        const progressFor = (step, label) => (loaded, total) => {
+            const ratio = total ? loaded / total : 0.5;
+            progressFill.style.width = `${Math.max(5, Math.round((step + ratio) * 50))}%`;
+            statusText.textContent = `Loading ${label}... (page ${loaded}${total ? `/${total}` : ''})`;
+        };
+
+        try {
+            statusText.textContent = 'Loading following...';
+            const following = await fetchMemberList(username, 'following', progressFor(0, 'following'));
+            statusText.textContent = 'Loading followers...';
+            const followers = await fetchMemberList(username, 'followers', progressFor(1, 'followers'));
+
+            cachedFollowData = { username: username.toLowerCase(), displayUsername: username, following, followers };
+            loadingView.style.display = 'none';
+            contentView.style.display = 'flex';
+            renderFollowResults();
+        } catch (err) {
+            statusText.textContent = err && err.message && err.message.startsWith('Too many')
+                ? err.message
+                : 'Unable to load following / followers. Please try again.';
+            subEl.textContent = `@${username}`;
+        } finally {
+            isFetchingFollows = false;
+        }
+    }
+
+    function getFollowLists() {
+        const { following, followers } = cachedFollowData;
+        return {
+            notFollowingBack: [...following.values()].filter(m => !followers.has(m.username)),
+            notFollowedBack: [...followers.values()].filter(m => !following.has(m.username))
+        };
+    }
+
+    function updateFollowCounts() {
+        const { displayUsername, following, followers } = cachedFollowData;
+        const { notFollowingBack, notFollowedBack } = getFollowLists();
+
+        document.getElementById('lbfl-header-sub').textContent =
+            `@${displayUsername} • following ${following.size.toLocaleString('en-US')} • ${followers.size.toLocaleString('en-US')} follower${followers.size === 1 ? '' : 's'}`;
+
+        const tabFollowing = document.getElementById('lbfl-tab-not-following-back');
+        const tabFollowers = document.getElementById('lbfl-tab-not-followed-back');
+        tabFollowing.textContent = `Don't follow back (${notFollowingBack.length})`;
+        tabFollowers.textContent = `Not followed back (${notFollowedBack.length})`;
+        tabFollowing.classList.toggle('active', currentFollowTab === 'not-following-back');
+        tabFollowers.classList.toggle('active', currentFollowTab === 'not-followed-back');
+    }
+
+    /**
+     * Follow / Unfollow button on a member card. After a click the card stays in place with the
+     * opposite action (so a mistake can be undone); it leaves the list on the next re-render.
+     */
+    function createFollowActionButton(member, isFollowing) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+
+        const setState = (following) => {
+            btn.className = `lbfl-action-btn ${following ? '-unfollow' : '-follow'}`;
+            btn.textContent = following ? 'Unfollow' : 'Follow';
+            btn.dataset.following = following ? 'true' : 'false';
+        };
+        setState(isFollowing);
+
+        btn.addEventListener('click', async () => {
+            if (btn.disabled) return;
+            const follow = btn.dataset.following !== 'true';
+            btn.disabled = true;
+            btn.textContent = follow ? 'Following...' : 'Unfollowing...';
+
+            try {
+                await setFollowState(member, follow);
+                if (follow) cachedFollowData.following.set(member.username, member);
+                else cachedFollowData.following.delete(member.username);
+                setState(follow);
+                updateFollowCounts();
+            } catch (err) {
+                setState(!follow);
+                btn.classList.add('-error');
+                btn.title = err && err.message ? err.message : 'Request failed';
+                btn.textContent = 'Error';
+                setTimeout(() => {
+                    btn.classList.remove('-error');
+                    setState(!follow);
+                }, 2500);
+            } finally {
+                btn.disabled = false;
+            }
+        });
+
+        return btn;
+    }
+
+    function renderFollowResults() {
+        if (!cachedFollowData) return;
+        const { displayUsername, following } = cachedFollowData;
+        const { notFollowingBack, notFollowedBack } = getFollowLists();
+
+        updateFollowCounts();
+
+        // Actions only make sense on your own lists while logged in
+        const canAct = getLoggedInUsername() === cachedFollowData.username;
+
+        const isFollowingTab = currentFollowTab === 'not-following-back';
+        document.getElementById('lbfl-tab-desc').textContent = isFollowingTab
+            ? `People @${displayUsername} follows who don't follow back.`
+            : `People following @${displayUsername} who aren't followed back.`;
+
+        const query = document.getElementById('lbfl-search').value.trim().toLowerCase();
+        const list = (isFollowingTab ? notFollowingBack : notFollowedBack)
+            .filter(m => !query || m.username.includes(query) || m.displayName.toLowerCase().includes(query));
+
+        const container = document.getElementById('lbfl-member-list');
+        container.innerHTML = '';
+
+        if (list.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'lbfl-empty';
+            empty.textContent = query ? 'No member matches this filter.' : 'Everyone is mutual here 🎉';
+            container.appendChild(empty);
+            return;
+        }
+
+        list.forEach(m => {
+            const card = document.createElement('div');
+            card.className = 'lbfl-member';
+
+            const profileLink = document.createElement('a');
+            profileLink.className = 'lbfl-member-link';
+            profileLink.href = m.link;
+            profileLink.target = '_blank';
+            profileLink.rel = 'noopener';
+
+            const img = document.createElement('img');
+            img.className = 'lbfl-member-avatar';
+            img.alt = '';
+            img.loading = 'lazy';
+            if (m.avatar) img.src = m.avatar;
+
+            const info = document.createElement('div');
+            info.className = 'lbfl-member-info';
+            const name = document.createElement('span');
+            name.className = 'lbfl-member-name';
+            name.textContent = m.displayName;
+            const handle = document.createElement('span');
+            handle.className = 'lbfl-member-handle';
+            handle.textContent = `@${m.username}`;
+            info.appendChild(name);
+            info.appendChild(handle);
+
+            profileLink.appendChild(img);
+            profileLink.appendChild(info);
+            card.appendChild(profileLink);
+
+            if (canAct) {
+                card.appendChild(createFollowActionButton(m, following.has(m.username)));
+            }
+            container.appendChild(card);
+        });
+    }
+
     /**
      * SPA navigation watcher & Button switcher
      */
     function updatePageButtons() {
         if (isWatchlistPage()) {
             removeStatsButton();
+            removeFollowButton();
             injectFloatingButton();
         } else if (isDiaryPage()) {
             removeWatchlistButton();
+            removeFollowButton();
             injectStatsButton();
+        } else if (isFollowPage()) {
+            removeWatchlistButton();
+            removeStatsButton();
+            injectFollowButton();
         } else {
             removeWatchlistButton();
             removeStatsButton();
+            removeFollowButton();
         }
     }
 

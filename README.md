@@ -1,6 +1,6 @@
-# 🎲 Letterboxd Companion (Watchlist Picker & Diary Stats)
+# 🎲 Letterboxd Companion (Watchlist Picker, Diary Stats & Follow Check)
 
-A sleek, lightweight browser extension designed with **Letterboxd's authentic UI** that picks random movies from any watchlist with a smooth carousel animation, and visualizes your diary activity with GitHub-style heatmaps and comprehensive viewing statistics.
+A sleek, lightweight browser extension designed with **Letterboxd's authentic UI** that picks random movies from any watchlist with a smooth carousel animation, and visualizes your diary activity with GitHub-style heatmaps and comprehensive viewing statistics. On any Following / Followers page, it also shows who doesn't follow back (and who you don't follow back).
 
 
 ---
@@ -18,6 +18,10 @@ A sleek, lightweight browser extension designed with **Letterboxd's authentic UI
 
 ### 4. Diary Activity Heatmap & Statistics
 ![Diary Statistics](screenshots/4-stats.png)
+
+### 5. Follow Check (Following / Followers)
+![Follow Check](screenshots/5-follow-check.png)
+*Simulated data — all names are made up.*
 
 ---
 
