@@ -725,7 +725,8 @@
    1. Floating Action Button (Statistics)
    -------------------------------------------------------------------------- */
 #lbst-stats-btn,
-#lbfl-follow-btn {
+#lbfl-follow-btn,
+#lbcp-compat-btn {
     position: fixed;
     bottom: 24px;
     left: 24px;
@@ -747,7 +748,8 @@
 }
 
 #lbst-stats-btn:hover,
-#lbfl-follow-btn:hover {
+#lbfl-follow-btn:hover,
+#lbcp-compat-btn:hover {
     background: #283038;
     border-color: #00e054;
     transform: translateY(-2px);
@@ -755,19 +757,22 @@
 }
 
 #lbst-stats-btn:active,
-#lbfl-follow-btn:active {
+#lbfl-follow-btn:active,
+#lbcp-compat-btn:active {
     transform: translateY(0);
 }
 
 #lbst-stats-btn svg,
-#lbfl-follow-btn svg {
+#lbfl-follow-btn svg,
+#lbcp-compat-btn svg {
     width: 26px;
     height: 26px;
     display: block;
 }
 
 #lbst-stats-tooltip,
-#lbfl-follow-tooltip {
+#lbfl-follow-tooltip,
+#lbcp-compat-tooltip {
     position: absolute;
     left: 60px;
     background: #14181c;
@@ -789,7 +794,8 @@
 }
 
 #lbst-stats-tooltip::before,
-#lbfl-follow-tooltip::before {
+#lbfl-follow-tooltip::before,
+#lbcp-compat-tooltip::before {
     content: '';
     position: absolute;
     left: -4px;
@@ -803,7 +809,8 @@
 }
 
 #lbst-stats-btn:hover #lbst-stats-tooltip,
-#lbfl-follow-btn:hover #lbfl-follow-tooltip {
+#lbfl-follow-btn:hover #lbfl-follow-tooltip,
+#lbcp-compat-btn:hover #lbcp-compat-tooltip {
     opacity: 1;
     transform: translateX(0);
     color: #ffffff;
@@ -813,7 +820,8 @@
    2. Statistics Modal Overlay & Container
    -------------------------------------------------------------------------- */
 #lbst-modal-overlay,
-#lbfl-modal-overlay {
+#lbfl-modal-overlay,
+#lbcp-modal-overlay {
     position: fixed;
     top: 0;
     left: 0;
@@ -836,13 +844,15 @@
 }
 
 #lbst-modal-overlay.active,
-#lbfl-modal-overlay.active {
+#lbfl-modal-overlay.active,
+#lbcp-modal-overlay.active {
     opacity: 1;
     pointer-events: auto;
 }
 
 #lbst-modal-container,
-#lbfl-modal-container {
+#lbfl-modal-container,
+#lbcp-modal-container {
     width: 100%;
     max-width: 920px;
     max-height: 90vh;
@@ -859,7 +869,8 @@
 }
 
 #lbst-modal-overlay.active #lbst-modal-container,
-#lbfl-modal-overlay.active #lbfl-modal-container {
+#lbfl-modal-overlay.active #lbfl-modal-container,
+#lbcp-modal-overlay.active #lbcp-modal-container {
     transform: scale(1);
 }
 
@@ -952,7 +963,8 @@
    3. Loading & Error States
    -------------------------------------------------------------------------- */
 #lbst-loading-state,
-#lbfl-loading-state {
+#lbfl-loading-state,
+#lbcp-loading-state {
     display: flex;
     flex-direction: column;
     align-items: center;
@@ -1051,6 +1063,8 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
 }
 
 .lbst-section-title {
@@ -1394,7 +1408,8 @@
    -------------------------------------------------------------------------- */
 @media (max-width: 768px) {
     #lbst-modal-container,
-    #lbfl-modal-container {
+    #lbfl-modal-container,
+    #lbcp-modal-container {
         max-height: 95vh;
     }
     .lbst-modal-body {
@@ -1589,4 +1604,258 @@
     overflow: hidden;
     opacity: 0;
     pointer-events: none;
+}
+
+/* ==========================================================================
+   Final messages in loading views (no films in common, too many films...)
+   ========================================================================== */
+#lbrnd-loading-state.is-message .lbrnd-spinner,
+#lbrnd-loading-state.is-message .lbrnd-progress-bar-wrap,
+#lbcp-loading-state.is-message .lbst-spinner,
+#lbcp-loading-state.is-message .lbst-progress-bar-wrap {
+    display: none;
+}
+
+/* ==========================================================================
+   Diary Statistics: ratings, decades & On This Day
+   ========================================================================== */
+.lbst-tooltip-stars {
+    margin-left: 4px;
+    font-size: 10px;
+    color: #00e054;
+    white-space: nowrap;
+}
+
+/* Many bars (e.g. 13 decades): tighter spacing and smaller labels */
+.lbst-chart-container.-dense {
+    gap: 4px;
+}
+
+.lbst-chart-container.-dense .lbst-bar-label {
+    font-size: 9px;
+    letter-spacing: 0;
+}
+
+.lbst-chart-empty {
+    flex: 1;
+    align-self: center;
+    text-align: center;
+    font-size: 13px;
+    color: #8899aa;
+}
+
+.lbst-onthisday-card {
+    background: #192026;
+    border: 1px solid #28323c;
+    border-radius: 4px;
+    padding: 6px 18px;
+}
+
+.lbst-onthisday-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 16px;
+    padding: 10px 0;
+    border-bottom: 1px solid #28323c;
+}
+
+.lbst-onthisday-row:last-child {
+    border-bottom: none;
+}
+
+.lbst-onthisday-year {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    width: 82px;
+}
+
+.lbst-onthisday-year strong {
+    font-size: 15px;
+    font-weight: 700;
+    color: #ffffff;
+}
+
+.lbst-onthisday-year span {
+    font-size: 11px;
+    color: #667788;
+}
+
+.lbst-onthisday-films {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    min-width: 0;
+}
+
+.lbst-onthisday-film {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    background: #202830;
+    border: 1px solid #303840;
+    border-radius: 3px;
+    font-size: 12px;
+    color: #ccddee;
+}
+
+.lbst-onthisday-stars {
+    font-size: 10px;
+    color: #00e054;
+}
+
+.lbst-onthisday-empty {
+    padding: 12px 0;
+    font-size: 13px;
+    color: #8899aa;
+}
+
+/* ==========================================================================
+   Taste Compatibility Styles
+   (button, overlay, container and loading state share the Stats rules above)
+   ========================================================================== */
+#lbcp-modal-container {
+    max-width: 680px;
+    height: 80vh;
+}
+
+#lbcp-content-view {
+    flex: 1;
+    min-height: 0;
+    gap: 14px;
+}
+
+.lbcp-score-row {
+    display: flex;
+    align-items: center;
+    gap: 20px;
+    padding: 16px 18px;
+    background: #192026;
+    border: 1px solid #28323c;
+    border-radius: 4px;
+}
+
+/* Ring filled with conic-gradient up to the score */
+.lbcp-score-ring {
+    --lbcp-score: 0;
+    flex-shrink: 0;
+    width: 84px;
+    height: 84px;
+    border-radius: 50%;
+    background: conic-gradient(#00e054 calc(var(--lbcp-score) * 1%), #2c3440 0);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+}
+
+.lbcp-score-ring::before {
+    content: '';
+    position: absolute;
+    inset: 7px;
+    border-radius: 50%;
+    background: #192026;
+}
+
+.lbcp-score-ring span {
+    position: relative;
+    font-size: 20px;
+    font-weight: 700;
+    color: #ffffff;
+}
+
+.lbcp-score-text {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.lbcp-score-label {
+    font-size: 18px;
+    font-weight: 700;
+    color: #ffffff;
+}
+
+.lbcp-score-sub {
+    font-size: 12px;
+    color: #8899aa;
+}
+
+.lbcp-film-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.lbcp-film {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 9px 12px;
+    background: #192026;
+    border: 1px solid #28323c;
+    border-radius: 4px;
+    text-decoration: none;
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.lbcp-film:hover {
+    border-color: #00e054;
+    background: #1e262d;
+}
+
+.lbcp-film-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: #ffffff;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.lbcp-film-year {
+    margin-left: 6px;
+    font-weight: 400;
+    color: #667788;
+}
+
+.lbcp-film-ratings {
+    display: flex;
+    gap: 14px;
+    flex-shrink: 0;
+}
+
+.lbcp-rating {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    min-width: 64px;
+}
+
+.lbcp-rating-who {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #667788;
+    max-width: 110px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.lbcp-rating-stars {
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.lbcp-rating.-me .lbcp-rating-stars {
+    color: #00e054;
+}
+
+.lbcp-rating.-them .lbcp-rating-stars {
+    color: #40bcf4;
 }

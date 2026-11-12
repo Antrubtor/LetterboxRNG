@@ -111,10 +111,35 @@ body {
     justify-content: space-between;
 }
 
+.setting-item + .setting-item {
+    margin-top: 8px;
+    padding-top: 8px;
+    border-top: 1px solid #242c34;
+}
+
+.settings-title {
+    font-size: 10px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: #667788;
+    margin-bottom: 8px;
+}
+
+.setting-text {
+    display: flex;
+    flex-direction: column;
+}
+
 .setting-label {
     font-size: 12px;
     font-weight: 600;
     color: #ccd7e0;
+}
+
+.setting-hint {
+    font-size: 10px;
+    color: #667788;
 }
 
 /* Switch Toggle */

@@ -10,8 +10,9 @@
     window.__LETTERBOXD_RND_INITIALIZED__ = true;
 
     // Global state
-    let cachedMovies = null;
-    let cachedPath = '';
+    const posterGridCache = new Map(); // baseUrl -> films of a watchlist / list
+    let currentPickerMovies = []; // films the roulette currently draws from
+    let currentPickerPool = 'all'; // 'all' or 'common' (only films also in my watchlist)
     let isFetching = false;
     let isSpinning = false;
     let audioCtx = null;
@@ -116,26 +117,68 @@
     }
 
     /**
-     * URL validation & Watchlist context extraction
+     * URL validation & picker context (watchlists and lists)
+     * Examples:
+     * - /antrubtor/watchlist/
+     * - /antrubtor/watchlist/genre/horror/page/2/
+     * - /dave/list/oscars-2027-priority-watchlist/
+     * - /dave/list/oscars-2027-priority-watchlist/detail/by/name/
      */
-    function isWatchlistPage() {
-        const path = window.location.pathname;
-        return /^\/[^\/]+\/watchlist/i.test(path);
+    function isPickablePage() {
+        return getPickerContext() !== null;
     }
 
-    function getWatchlistContext() {
-        const match = window.location.pathname.match(/^\/([^\/]+)\/watchlist(.*)/i);
-        if (!match) return null;
+    function getPickerContext() {
+        const path = window.location.pathname;
 
-        const username = match[1];
-        let subpath = match[2] || '';
-        subpath = subpath.replace(/\/page\/\d+\/?/i, '/');
-        if (!subpath.endsWith('/')) subpath += '/';
+        const watchlist = path.match(/^\/([^\/]+)\/watchlist(\/.*)?$/i);
+        if (watchlist) {
+            return {
+                type: 'watchlist',
+                username: watchlist[1],
+                baseUrl: `/${watchlist[1]}/watchlist${cleanPickerSubpath(watchlist[2])}`
+            };
+        }
 
-        return {
-            username,
-            baseUrl: `/${username}/watchlist${subpath === '/' ? '/' : subpath}`
-        };
+        const list = path.match(/^\/([^\/]+)\/list\/([^\/]+)(\/.*)?$/i);
+        if (list && !/^\/(?:edit|share)(?:\/|$)/i.test(list[3] || '')) {
+            return {
+                type: 'list',
+                username: list[1],
+                baseUrl: `/${list[1]}/list/${list[2]}${cleanPickerSubpath(list[3])}`
+            };
+        }
+
+        return null;
+    }
+
+    // Keeps filters (/genre/horror/, /by/name/...) but drops pagination and the list "detail" layout
+    function cleanPickerSubpath(subpath) {
+        let clean = (subpath || '/').replace(/\/page\/\d+\/?/i, '/').replace(/\/detail(?=\/|$)/i, '');
+        if (!clean.startsWith('/')) clean = '/' + clean;
+        if (!clean.endsWith('/')) clean += '/';
+        return clean;
+    }
+
+    /**
+     * URL builder for page N of a paginated listing, following the pagination links' own pattern:
+     * /dave/diary/ paginates as /dave/diary/films/page/2/, not /dave/diary/page/2/
+     */
+    function pageUrlFor(doc, baseUrl) {
+        const href = doc.querySelector('.pagination a[href*="/page/"]')?.getAttribute('href');
+        if (href && /\/page\/\d+\/?/.test(href)) {
+            return (n) => href.replace(/\/page\/\d+\/?/, `/page/${n}/`);
+        }
+        return (n) => `${baseUrl}page/${n}/`;
+    }
+
+    /**
+     * Fetch a Letterboxd page and parse it (same-origin, with the user's session)
+     */
+    async function fetchDocument(url) {
+        const res = await fetch(url, { credentials: 'same-origin' });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return new DOMParser().parseFromString(await res.text(), 'text/html');
     }
 
     /**
@@ -167,73 +210,11 @@
     }
 
     /**
-     * Unique top-level film extraction without duplicates
+     * Film extraction from a poster grid page (watchlist grid or list poster-list)
      */
-    function extractMoviesFromDocOrHtml(docOrHtml) {
+    function extractMoviesFromDoc(doc) {
         const movies = [];
-
-        // Raw HTML string parsing (pages 2 to N)
-        if (typeof docOrHtml === 'string') {
-            const itemRegex = /<li[^>]*class=["'][^"']*(?:griditem|poster-container|listitem)[^"']*["'][^>]*>([\s\S]*?)<\/li>/gi;
-            let match;
-
-            while ((match = itemRegex.exec(docOrHtml)) !== null) {
-                const itemHtml = match[1];
-
-                let slug = '';
-                const slugMatch = itemHtml.match(/data-item-slug=["']([^"']+)["']/) ||
-                                  itemHtml.match(/data-target-link=["']\/film\/([^"/]+)\/?["']/) ||
-                                  itemHtml.match(/data-film-slug=["']([^"']+)["']/) ||
-                                  itemHtml.match(/href=["']\/film\/([^"/]+)\/?["']/);
-                if (slugMatch) slug = slugMatch[1];
-
-                let name = '';
-                const nameMatch = itemHtml.match(/data-item-name=["']([^"']+)["']/) ||
-                                  itemHtml.match(/data-film-name=["']([^"']+)["']/) ||
-                                  itemHtml.match(/alt=["']([^"']+)["']/);
-                if (nameMatch) name = nameMatch[1];
-
-                let year = '';
-                const yearMatch = itemHtml.match(/data-film-release-year=["']([^"']+)["']/) ||
-                                  (name && name.match(/\((\d{4})\)/));
-                if (yearMatch) {
-                    year = typeof yearMatch === 'string' ? yearMatch : yearMatch[1];
-                    if (name) name = name.replace(/\s*\(\d{4}\)\s*$/, '').trim();
-                }
-
-                let filmId = '';
-                const uidMatch = itemHtml.match(/film:(\d+)/) || itemHtml.match(/data-film-id=["'](\d+)["']/);
-                if (uidMatch) filmId = uidMatch[1];
-
-                let cacheKey = '';
-                const cacheMatch = itemHtml.match(/cacheBustingKey["']:["']([a-zA-Z0-9]+)["']/);
-                if (cacheMatch) cacheKey = cacheMatch[1];
-
-                let poster = '';
-                if (filmId && slug) {
-                    poster = buildCdnPosterUrl(filmId, slug, cacheKey);
-                }
-
-                if (slug) {
-                    const cleanSlug = slug.startsWith('/film/') ? slug : `/film/${slug}/`;
-                    movies.push({
-                        name: name || slug.replace(/[-/]/g, ' ').trim(),
-                        year: year || '',
-                        slug: cleanSlug,
-                        filmId: filmId || '',
-                        cacheKey: cacheKey || '',
-                        poster: poster || '',
-                        link: `https://letterboxd.com${cleanSlug}`
-                    });
-                }
-            }
-
-            return movies;
-        }
-
-        // Live DOM parsing (page 1)
-        const doc = docOrHtml;
-        const listItems = doc.querySelectorAll('ul.grid li.griditem, ul.poster-list li.poster-container, ul.poster-list li.listitem, li.griditem');
+        const listItems = doc.querySelectorAll('ul.grid li.griditem, ul.poster-list li.posteritem, ul.poster-list li.poster-container, ul.poster-list li.listitem, li.griditem');
 
         listItems.forEach(li => {
             const lazyDiv = li.querySelector('.react-component[data-component-class="LazyPoster"]') || (li.classList.contains('react-component') ? li : null);
@@ -358,51 +339,32 @@
     }
 
     /**
-     * Fetch complete watchlist with concurrency batching
+     * Fetch every film of a paginated poster grid (watchlist or list) with concurrency batching
      */
-    async function fetchEntireWatchlist(onProgress) {
-        const ctx = getWatchlistContext();
-        if (!ctx) throw new Error("Unable to detect Watchlist context.");
-
-        if (cachedMovies && cachedPath === window.location.pathname) {
-            return cachedMovies;
+    async function fetchPosterGrid(baseUrl, onProgress) {
+        if (posterGridCache.has(baseUrl)) {
+            return posterGridCache.get(baseUrl);
         }
 
-        const firstPageMovies = extractMoviesFromDocOrHtml(document);
-        const totalPages = detectTotalPages(document);
+        const firstDoc = await fetchDocument(baseUrl);
+        const totalPages = detectTotalPages(firstDoc);
+        const pageUrl = pageUrlFor(firstDoc, baseUrl);
+        let allMovies = extractMoviesFromDoc(firstDoc);
+        onProgress?.(1, totalPages, allMovies.length);
 
-        let allMovies = [...firstPageMovies];
+        const BATCH_SIZE = 5;
+        for (let p = 2; p <= totalPages; p += BATCH_SIZE) {
+            const batch = [];
+            for (let n = p; n < p + BATCH_SIZE && n <= totalPages; n++) batch.push(n);
 
-        if (totalPages > 1) {
-            onProgress?.(1, totalPages, allMovies.length);
+            const results = await Promise.all(batch.map(n =>
+                fetchDocument(pageUrl(n)).then(extractMoviesFromDoc).catch(() => [])
+            ));
+            results.forEach(pageMovies => {
+                allMovies = allMovies.concat(pageMovies);
+            });
 
-            const remainingPages = [];
-            for (let p = 2; p <= totalPages; p++) {
-                remainingPages.push(p);
-            }
-
-            const BATCH_SIZE = 5;
-            for (let i = 0; i < remainingPages.length; i += BATCH_SIZE) {
-                const batch = remainingPages.slice(i, i + BATCH_SIZE);
-                const results = await Promise.all(batch.map(async (pageNum) => {
-                    try {
-                        const pageUrl = `${ctx.baseUrl}page/${pageNum}/`;
-                        const res = await fetch(pageUrl, { credentials: 'same-origin' });
-                        if (!res.ok) return [];
-                        const html = await res.text();
-                        return extractMoviesFromDocOrHtml(html);
-                    } catch (err) {
-                        return [];
-                    }
-                }));
-
-                results.forEach(pageMovies => {
-                    allMovies = allMovies.concat(pageMovies);
-                });
-
-                const loadedPages = Math.min(i + BATCH_SIZE + 1, totalPages);
-                onProgress?.(loadedPages, totalPages, allMovies.length);
-            }
+            onProgress?.(Math.min(p + BATCH_SIZE - 1, totalPages), totalPages, allMovies.length);
         }
 
         // Strict deduplication by slug
@@ -415,10 +377,8 @@
             }
         }
 
-        cachedMovies = uniqueMovies.length > 0 ? uniqueMovies : firstPageMovies;
-        cachedPath = window.location.pathname;
-
-        return cachedMovies;
+        posterGridCache.set(baseUrl, uniqueMovies);
+        return uniqueMovies;
     }
 
     /**
@@ -550,11 +510,11 @@
      */
     function injectFloatingButton() {
         if (document.getElementById('lbrnd-dice-btn')) return;
-        if (!isWatchlistPage()) return;
+        if (!isPickablePage()) return;
 
         const btn = document.createElement('button');
         btn.id = 'lbrnd-dice-btn';
-        btn.setAttribute('aria-label', 'Pick a random movie from watchlist');
+        btn.setAttribute('aria-label', 'Pick a random film');
         btn.innerHTML = `
             ${SVG_DICE_ICON}
             <div id="lbrnd-dice-tooltip">Pick random film</div>
@@ -591,6 +551,10 @@
                         </div>
                     </div>
                     <div class="lbrnd-header-controls">
+                        <select class="lbst-year-select" id="lbrnd-pool-select" title="Films to pick from" style="display: none;">
+                            <option value="all">All films</option>
+                            <option value="common">In common with my watchlist</option>
+                        </select>
                         <button class="lbrnd-btn-icon" id="lbrnd-sound-toggle" title="Toggle sound">
                             <span id="lbrnd-sound-icon">${soundEnabled ? '🔊' : '🔇'}</span>
                         </button>
@@ -672,9 +636,14 @@
         });
 
         document.getElementById('lbrnd-reroll-btn').addEventListener('click', () => {
-            if (!isSpinning && cachedMovies && cachedMovies.length > 0) {
-                startRoulette(cachedMovies);
+            if (!isSpinning && currentPickerMovies.length > 0) {
+                startRoulette(currentPickerMovies);
             }
+        });
+
+        document.getElementById('lbrnd-pool-select').addEventListener('change', (e) => {
+            currentPickerPool = e.target.value;
+            loadAndSpin();
         });
 
         window.addEventListener('keydown', (e) => {
@@ -701,8 +670,22 @@
         const overlay = document.getElementById('lbrnd-modal-overlay');
         overlay.classList.add('active');
 
-        const ctx = getWatchlistContext();
-        document.getElementById('lbrnd-header-sub').textContent = ctx ? `Watchlist of @${ctx.username}` : 'Letterboxd Watchlist';
+        const ctx = getPickerContext();
+        document.getElementById('lbrnd-header-sub').textContent = ctx
+            ? (ctx.type === 'list' ? `List by @${ctx.username}` : `Watchlist of @${ctx.username}`)
+            : 'Letterboxd';
+
+        // "Common" pool: someone else's watchlist (films you both want to see) or any list
+        // (its films that are in your watchlist). Needs to know who is logged in.
+        const poolSelect = document.getElementById('lbrnd-pool-select');
+        const me = getLoggedInUsername();
+        const commonAllowed = !!(ctx && me && !(ctx.type === 'watchlist' && ctx.username.toLowerCase() === me));
+        if (!commonAllowed) currentPickerPool = 'all';
+        poolSelect.style.display = commonAllowed ? 'block' : 'none';
+        poolSelect.querySelector('option[value="common"]').textContent = ctx && ctx.type === 'list'
+            ? 'Only films in my watchlist'
+            : 'In common with my watchlist';
+        poolSelect.value = currentPickerPool;
 
         loadAndSpin();
     }
@@ -723,32 +706,69 @@
         const statusText = document.getElementById('lbrnd-loading-status');
         const progressFill = document.getElementById('lbrnd-progress-fill');
 
+        const ctx = getPickerContext();
+        if (!ctx) return;
+        const sourceLabel = ctx.type === 'list' ? 'list' : 'watchlist';
+        const poolSelect = document.getElementById('lbrnd-pool-select');
+
         loadingView.style.display = 'flex';
+        loadingView.classList.remove('is-message');
         rouletteView.style.display = 'none';
         revealView.style.display = 'none';
         progressFill.style.width = '10%';
 
         isFetching = true;
+        poolSelect.disabled = true;
+
+        const progressFor = (label) => (loaded, total, count) => {
+            const percent = Math.round((loaded / total) * 100);
+            progressFill.style.width = `${Math.max(10, percent)}%`;
+            statusText.textContent = `Indexing ${label}... (${count} films • Page ${loaded}/${total})`;
+        };
+
+        // Final message instead of a roulette: stop the spinner and progress bar
+        const showMessage = (text) => {
+            statusText.textContent = text;
+            loadingView.classList.add('is-message');
+        };
 
         try {
-            const movies = await fetchEntireWatchlist((loaded, total, count) => {
-                const percent = Math.round((loaded / total) * 100);
-                progressFill.style.width = `${Math.max(10, percent)}%`;
-                statusText.textContent = `Indexing watchlist... (${count} films • Page ${loaded}/${total})`;
-            });
+            let movies = await fetchPosterGrid(ctx.baseUrl, progressFor(sourceLabel));
+            let subtitle = `${movies.length.toLocaleString('en-US')} films in ${sourceLabel}`;
 
-            isFetching = false;
+            if (movies.length > 0 && currentPickerPool === 'common') {
+                const me = getLoggedInUsername();
+                progressFill.style.width = '10%';
+                const myWatchlist = await fetchPosterGrid(`/${me}/watchlist/`, progressFor('your watchlist'));
+                const mySlugs = new Set(myWatchlist.map(m => m.slug));
+                movies = movies.filter(m => mySlugs.has(m.slug));
 
-            if (!movies || movies.length === 0) {
-                statusText.textContent = "No films found in this watchlist!";
+                const n = movies.length.toLocaleString('en-US');
+                subtitle = ctx.type === 'list'
+                    ? `${n} film${movies.length === 1 ? '' : 's'} of this list in your watchlist`
+                    : `${n} film${movies.length === 1 ? '' : 's'} in common with @${ctx.username}`;
+
+                if (movies.length === 0) {
+                    showMessage(ctx.type === 'list'
+                        ? 'None of the films in this list is in your watchlist.'
+                        : `No films in common between your watchlist and @${ctx.username}'s.`);
+                    return;
+                }
+            }
+
+            if (movies.length === 0) {
+                showMessage(`No films found in this ${sourceLabel}!`);
                 return;
             }
 
-            document.getElementById('lbrnd-header-sub').textContent = `${movies.length.toLocaleString('en-US')} films in watchlist`;
+            currentPickerMovies = movies;
+            document.getElementById('lbrnd-header-sub').textContent = subtitle;
             startRoulette(movies);
         } catch (err) {
+            showMessage(`Failed to load ${sourceLabel}. Please try again.`);
+        } finally {
             isFetching = false;
-            statusText.textContent = "Failed to load watchlist. Please try again.";
+            poolSelect.disabled = isSpinning;
         }
     }
 
@@ -758,6 +778,7 @@
     function startRoulette(movies) {
         if (isSpinning) return;
         isSpinning = true;
+        document.getElementById('lbrnd-pool-select').disabled = true;
 
         const loadingView = document.getElementById('lbrnd-loading-state');
         const rouletteView = document.getElementById('lbrnd-roulette-view');
@@ -805,7 +826,7 @@
             fallbackDiv.style.display = m.poster ? 'none' : 'flex';
             fallbackDiv.innerHTML = `
                 <svg class="lbrnd-poster-fallback-icon" viewBox="0 0 24 24"><path d="M18 4l2 4h-3l-2-4h-2l2 4h-3l-2-4H8l2 4H7L5 4H4c-1.1 0-1.99.9-1.99 2L2 18c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2V4h-4z"/></svg>
-                <span class="lbrnd-poster-fallback-title">${m.name}</span>
+                <span class="lbrnd-poster-fallback-title">${escapeHtml(m.name)}</span>
             `;
 
             // Auto-resolve custom poster on error
@@ -825,8 +846,8 @@
             const infoDiv = document.createElement('div');
             infoDiv.className = 'lbrnd-reel-card-info';
             infoDiv.innerHTML = `
-                <div class="lbrnd-reel-card-title">${m.name}</div>
-                <div class="lbrnd-reel-card-year">${m.year || ''}</div>
+                <div class="lbrnd-reel-card-title">${escapeHtml(m.name)}</div>
+                <div class="lbrnd-reel-card-year">${escapeHtml(m.year || '')}</div>
             `;
 
             card.appendChild(cardImg);
@@ -870,6 +891,7 @@
         // 6. Reveal winner
         setTimeout(async () => {
             isSpinning = false;
+            document.getElementById('lbrnd-pool-select').disabled = false;
             playWinFanfare();
 
             const winnerCard = track.children[WINNER_INDEX];
@@ -943,7 +965,7 @@
 
         const directorEl = document.getElementById('lbrnd-reveal-director');
         if (film.directors && film.directors.length > 0) {
-            directorEl.innerHTML = `Directed by <strong>${film.directors.join(', ')}</strong>`;
+            directorEl.innerHTML = `Directed by <strong>${escapeHtml(film.directors.join(', '))}</strong>`;
             directorEl.style.display = 'block';
         } else {
             directorEl.style.display = 'none';
@@ -986,7 +1008,7 @@
     let currentEntries = [];
     let currentSelectedYear = null;
     let currentStatsData = null;
-    let currentChartMode = 'days'; // 'days' or 'months'
+    let currentChartMode = 'days'; // 'days', 'months', 'ratings' or 'decades'
 
     const MONTH_MAP = {
         'jan': 1, 'janv': 1, 'january': 1, 'janvier': 1,
@@ -1053,13 +1075,29 @@
 
         rows.forEach(row => {
             const filmLink = row.querySelector('h3.film-title a, .td-film-details h3 a, h3 a, .film-poster, a.frame');
-            if (!filmLink && !row.querySelector('.film-poster')) return;
+            if (!filmLink && !row.querySelector('.film-poster, [data-item-name]')) return;
 
-            const title = row.querySelector('h3.film-title, .td-film-details h3, h3')?.textContent?.trim() ||
-                          filmLink?.getAttribute('data-film-name') ||
-                          filmLink?.getAttribute('data-item-name') ||
-                          row.querySelector('.film-poster img')?.getAttribute('alt') ||
+            // Current layout: <h2 class="primaryname">Title</h2>; poster attributes carry "Title (Year)"
+            const posterData = row.querySelector('[data-item-name], [data-film-name]');
+            const stripYear = (s) => (s || '').replace(/^Poster for\s+/i, '').replace(/\s*\(\d{4}\)\s*$/, '').trim();
+            const title = row.querySelector('h2.primaryname, h3.film-title, .td-film-details h3, h3')?.textContent?.trim() ||
+                          stripYear(posterData?.getAttribute('data-item-name') || posterData?.getAttribute('data-film-name')) ||
+                          row.querySelector('.frame-title')?.textContent?.trim() ||
+                          stripYear(row.querySelector('.film-poster img')?.getAttribute('alt')) ||
                           filmLink?.textContent?.trim() || 'Film';
+
+            // Rating is "rated-N" with N = half-stars (1..10); like / rewatch / review are icon cells
+            const ratingMatch = row.querySelector('.col-rating .rating, .td-rating .rating')?.className.match(/rated-(\d+)/);
+            const rating = ratingMatch ? parseInt(ratingMatch[1], 10) : null;
+            const liked = !!row.querySelector('.col-like .icon-liked, .td-like .icon-liked');
+            const rewatchCell = row.querySelector('td.col-rewatch, td.td-rewatch');
+            const rewatch = rewatchCell ? !rewatchCell.classList.contains('icon-status-off') : false;
+            const reviewCell = row.querySelector('td.col-review, td.td-review');
+            const review = reviewCell ? !reviewCell.classList.contains('icon-status-off') : false;
+
+            const releaseText = row.querySelector('td.col-releaseyear, td.td-released, .releasedate')?.textContent ||
+                                (posterData?.getAttribute('data-item-name') || '').match(/\((\d{4})\)\s*$/)?.[1] || '';
+            const releaseYear = parseInt((releaseText.match(/\d{4}/) || [])[0], 10) || null;
 
             let entryDate = null;
 
@@ -1138,7 +1176,12 @@
                     date: entryDate.dateStr,
                     year: entryDate.year,
                     month: entryDate.month,
-                    day: entryDate.day
+                    day: entryDate.day,
+                    rating,
+                    liked,
+                    rewatch,
+                    review,
+                    releaseYear
                 });
             }
         });
@@ -1163,22 +1206,18 @@
 
         let firstPageEntries = [];
         let totalPages = 1;
+        let pageUrl = (n) => `${targetBasePath}page/${n}/`;
 
-        if (window.location.pathname === targetBasePath || window.location.pathname === targetBasePath.replace(/\/$/, '')) {
-            firstPageEntries = extractDiaryEntriesFromDoc(document, targetFallbackYear);
-            totalPages = detectTotalPages(document);
-        } else {
-            try {
-                const res = await fetch(targetBasePath, { credentials: 'same-origin' });
-                if (res.ok) {
-                    const html = await res.text();
-                    const pageDoc = new DOMParser().parseFromString(html, 'text/html');
-                    firstPageEntries = extractDiaryEntriesFromDoc(pageDoc, targetFallbackYear);
-                    totalPages = detectTotalPages(pageDoc);
-                }
-            } catch (err) {
-                // Network error fallback
-            }
+        // Page 1 is always fetched rather than read from the live page: the server HTML is the same
+        // for every viewer, while the live DOM may already be reworked by Letterboxd's scripts
+        // (e.g. owner-only rating widgets replacing the static stars)
+        try {
+            const pageDoc = await fetchDocument(targetBasePath);
+            firstPageEntries = extractDiaryEntriesFromDoc(pageDoc, targetFallbackYear);
+            totalPages = detectTotalPages(pageDoc);
+            pageUrl = pageUrlFor(pageDoc, targetBasePath);
+        } catch (err) {
+            // Network error fallback
         }
 
         let allEntries = [...firstPageEntries];
@@ -1196,11 +1235,7 @@
                 const batch = remainingPages.slice(i, i + BATCH_SIZE);
                 const results = await Promise.all(batch.map(async (pageNum) => {
                     try {
-                        const pageUrl = `${targetBasePath}page/${pageNum}/`;
-                        const res = await fetch(pageUrl, { credentials: 'same-origin' });
-                        if (!res.ok) return [];
-                        const html = await res.text();
-                        const pageDoc = new DOMParser().parseFromString(html, 'text/html');
+                        const pageDoc = await fetchDocument(pageUrl(pageNum));
                         return extractDiaryEntriesFromDoc(pageDoc, targetFallbackYear);
                     } catch (err) {
                         return [];
@@ -1232,7 +1267,7 @@
         const dateFilmMap = {};
         targetEntries.forEach(e => {
             if (!dateFilmMap[e.date]) dateFilmMap[e.date] = [];
-            dateFilmMap[e.date].push(e.title);
+            dateFilmMap[e.date].push(e);
         });
 
         const dayNames = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
@@ -1435,6 +1470,42 @@
             }
         });
 
+        // 6. Ratings, rewatches, likes, reviews and release decades
+        const ratingCounts = new Array(10).fill(0); // index 0 = ½★ ... index 9 = ★★★★★
+        let ratingSum = 0;
+        let ratedCount = 0;
+        let rewatchCount = 0;
+        let likedCount = 0;
+        let reviewCount = 0;
+        const decadeCounts = {};
+
+        targetEntries.forEach(e => {
+            if (e.rating >= 1 && e.rating <= 10) {
+                ratingCounts[e.rating - 1]++;
+                ratingSum += e.rating;
+                ratedCount++;
+            }
+            if (e.rewatch) rewatchCount++;
+            if (e.liked) likedCount++;
+            if (e.review) reviewCount++;
+            if (e.releaseYear) {
+                const decade = Math.floor(e.releaseYear / 10) * 10;
+                decadeCounts[decade] = (decadeCounts[decade] || 0) + 1;
+            }
+        });
+
+        // Every decade between the oldest and newest film, so gaps show as empty bars
+        const decadeKeys = Object.keys(decadeCounts).map(Number).sort((a, b) => a - b);
+        const decadeStats = [];
+        if (decadeKeys.length > 0) {
+            for (let dec = decadeKeys[0]; dec <= decadeKeys[decadeKeys.length - 1]; dec += 10) {
+                decadeStats.push({ name: `${dec}s`, short: `${dec}s`, count: decadeCounts[dec] || 0 });
+            }
+        }
+        const topDecade = decadeStats.reduce((best, d) => (d.count > (best ? best.count : 0) ? d : best), null);
+
+        const ratingShorts = ['½', '1', '1½', '2', '2½', '3', '3½', '4', '4½', '5'];
+
         return {
             year,
             isAllTime,
@@ -1462,7 +1533,52 @@
                 name,
                 short: monthShorts[i],
                 count: monthCounts[i]
-            }))
+            })),
+            avgRating: ratedCount > 0 ? ratingSum / ratedCount / 2 : null,
+            ratedCount,
+            rewatchCount,
+            likedCount,
+            reviewCount,
+            ratingStats: ratingCounts.map((count, i) => ({
+                name: `${formatStars(i + 1)} (${(i + 1) / 2})`,
+                short: ratingShorts[i],
+                count
+            })),
+            decadeStats,
+            datedFilmsCount: decadeStats.reduce((sum, d) => sum + d.count, 0),
+            topDecadeName: topDecade ? topDecade.name : '-',
+            topDecadeCount: topDecade ? topDecade.count : 0
+        };
+    }
+
+    /**
+     * Half-star rating (1..10) to Letterboxd stars, e.g. 7 -> "★★★½"
+     */
+    function formatStars(halfStars) {
+        if (!halfStars) return '';
+        return '★'.repeat(Math.floor(halfStars / 2)) + (halfStars % 2 ? '½' : '');
+    }
+
+    /**
+     * Films logged on today's day/month in previous years (all loaded entries, not just the selected year)
+     */
+    function computeOnThisDay(entries) {
+        const today = new Date();
+        const month = today.getMonth() + 1;
+        const day = today.getDate();
+        const byYear = {};
+
+        entries.forEach(e => {
+            if (e.month === month && e.day === day && e.year < today.getFullYear()) {
+                if (!byYear[e.year]) byYear[e.year] = [];
+                byYear[e.year].push(e);
+            }
+        });
+
+        const monthsLongEn = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+        return {
+            label: `${monthsLongEn[month - 1]} ${day}`,
+            years: Object.keys(byYear).map(Number).sort((a, b) => b - a).map(year => ({ year, films: byYear[year] }))
         };
     }
 
@@ -1571,6 +1687,31 @@
                             <span class="lbst-metric-value" id="lbst-metric-top-month">-</span>
                             <span class="lbst-metric-sub" id="lbst-metric-top-month-count">0 films</span>
                         </div>
+                        <div class="lbst-metric-card">
+                            <span class="lbst-metric-label">Average Rating</span>
+                            <span class="lbst-metric-value" id="lbst-metric-avg-rating">-</span>
+                            <span class="lbst-metric-sub" id="lbst-metric-avg-rating-sub">no rated films</span>
+                        </div>
+                        <div class="lbst-metric-card">
+                            <span class="lbst-metric-label">Rewatches</span>
+                            <span class="lbst-metric-value" id="lbst-metric-rewatch">0</span>
+                            <span class="lbst-metric-sub" id="lbst-metric-rewatch-pct">0% of films</span>
+                        </div>
+                        <div class="lbst-metric-card">
+                            <span class="lbst-metric-label">Liked</span>
+                            <span class="lbst-metric-value" id="lbst-metric-liked">0</span>
+                            <span class="lbst-metric-sub" id="lbst-metric-liked-pct">0% of films</span>
+                        </div>
+                        <div class="lbst-metric-card">
+                            <span class="lbst-metric-label">Reviews</span>
+                            <span class="lbst-metric-value" id="lbst-metric-reviews">0</span>
+                            <span class="lbst-metric-sub" id="lbst-metric-reviews-pct">0% of films</span>
+                        </div>
+                        <div class="lbst-metric-card">
+                            <span class="lbst-metric-label">Top Decade</span>
+                            <span class="lbst-metric-value" id="lbst-metric-top-decade">-</span>
+                            <span class="lbst-metric-sub" id="lbst-metric-top-decade-count">0 films</span>
+                        </div>
                     </div>
 
                     <!-- GitHub Heatmap Grid -->
@@ -1614,18 +1755,28 @@
                         </div>
                     </div>
 
-                    <!-- Bar Chart Section with Days/Months Toggle -->
+                    <!-- Bar Chart Section with Days/Months/Ratings/Decades Toggle -->
                     <div class="lbst-section">
                         <div class="lbst-section-header">
                             <h4 class="lbst-section-title">Viewing Distribution</h4>
-                            <div class="lbst-toggle-group">
-                                <button class="lbst-toggle-btn active" id="lbst-toggle-days">Days</button>
-                                <button class="lbst-toggle-btn" id="lbst-toggle-months">Months</button>
+                            <div class="lbst-toggle-group" id="lbst-chart-toggles">
+                                <button class="lbst-toggle-btn active" data-chart-mode="days">Days</button>
+                                <button class="lbst-toggle-btn" data-chart-mode="months">Months</button>
+                                <button class="lbst-toggle-btn" data-chart-mode="ratings">Ratings</button>
+                                <button class="lbst-toggle-btn" data-chart-mode="decades">Decades</button>
                             </div>
                         </div>
                         <div class="lbst-chart-card">
                             <div class="lbst-chart-container" id="lbst-chart-container"></div>
                         </div>
+                    </div>
+
+                    <!-- On This Day: same date in previous years -->
+                    <div class="lbst-section">
+                        <div class="lbst-section-header">
+                            <h4 class="lbst-section-title" id="lbst-onthisday-title">On This Day</h4>
+                        </div>
+                        <div class="lbst-onthisday-card" id="lbst-onthisday"></div>
                     </div>
                 </div>
             </div>
@@ -1651,22 +1802,15 @@
         document.getElementById('lbst-content-view').addEventListener('scroll', unpinTooltip);
         overlay.querySelector('.lbst-heatmap-card').addEventListener('scroll', unpinTooltip);
 
-        document.getElementById('lbst-toggle-days').addEventListener('click', () => {
-            if (currentChartMode !== 'days') {
-                currentChartMode = 'days';
-                document.getElementById('lbst-toggle-days').classList.add('active');
-                document.getElementById('lbst-toggle-months').classList.remove('active');
+        overlay.querySelectorAll('#lbst-chart-toggles .lbst-toggle-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                if (currentChartMode === btn.dataset.chartMode) return;
+                currentChartMode = btn.dataset.chartMode;
+                overlay.querySelectorAll('#lbst-chart-toggles .lbst-toggle-btn').forEach(b => {
+                    b.classList.toggle('active', b === btn);
+                });
                 if (currentStatsData) renderBarChart(currentStatsData);
-            }
-        });
-
-        document.getElementById('lbst-toggle-months').addEventListener('click', () => {
-            if (currentChartMode !== 'months') {
-                currentChartMode = 'months';
-                document.getElementById('lbst-toggle-months').classList.add('active');
-                document.getElementById('lbst-toggle-days').classList.remove('active');
-                if (currentStatsData) renderBarChart(currentStatsData);
-            }
+            });
         });
 
         document.getElementById('lbst-year-select').addEventListener('change', (e) => {
@@ -1919,6 +2063,20 @@
         document.getElementById('lbst-metric-top-month').textContent = stats.topMonthName;
         document.getElementById('lbst-metric-top-month-count').textContent = `${stats.topMonthCount} film${stats.topMonthCount === 1 ? '' : 's'}${isAllTime ? ' (all-time)' : ''}`;
 
+        const pctOfFilms = (n) => `${stats.totalFilms ? Math.round((n / stats.totalFilms) * 100) : 0}% of films`;
+        document.getElementById('lbst-metric-avg-rating').textContent = stats.avgRating !== null ? `★ ${stats.avgRating.toFixed(2)}` : '-';
+        document.getElementById('lbst-metric-avg-rating-sub').textContent = stats.ratedCount > 0
+            ? `from ${stats.ratedCount.toLocaleString('en-US')} rated film${stats.ratedCount === 1 ? '' : 's'}`
+            : 'no rated films';
+        document.getElementById('lbst-metric-rewatch').textContent = stats.rewatchCount.toLocaleString('en-US');
+        document.getElementById('lbst-metric-rewatch-pct').textContent = pctOfFilms(stats.rewatchCount);
+        document.getElementById('lbst-metric-liked').textContent = stats.likedCount.toLocaleString('en-US');
+        document.getElementById('lbst-metric-liked-pct').textContent = pctOfFilms(stats.likedCount);
+        document.getElementById('lbst-metric-reviews').textContent = stats.reviewCount.toLocaleString('en-US');
+        document.getElementById('lbst-metric-reviews-pct').textContent = pctOfFilms(stats.reviewCount);
+        document.getElementById('lbst-metric-top-decade').textContent = stats.topDecadeName;
+        document.getElementById('lbst-metric-top-decade-count').textContent = `${stats.topDecadeCount} film${stats.topDecadeCount === 1 ? '' : 's'}`;
+
         // 2. Heatmap Months Row
         const monthsRow = document.getElementById('lbst-months-row');
         monthsRow.innerHTML = '';
@@ -1957,7 +2115,7 @@
 
                         let filmsHtml = '';
                         if (day.films && day.films.length > 0) {
-                            filmsHtml = `<ul class="lbst-tooltip-films">${day.films.map(f => `<li>${escapeHtml(f)}</li>`).join('')}</ul>`;
+                            filmsHtml = `<ul class="lbst-tooltip-films">${day.films.map(f => `<li>${escapeHtml(f.title)}${f.rating ? ` <span class="lbst-tooltip-stars">${formatStars(f.rating)}</span>` : ''}</li>`).join('')}</ul>`;
                         }
 
                         const countText = day.count === 0 ? 'No films logged' : `${day.count} film${day.count === 1 ? '' : 's'} logged:`;
@@ -2023,10 +2181,68 @@
 
         // 5. Bar Chart
         renderBarChart(stats);
+
+        // 6. On This Day
+        renderOnThisDay();
     }
 
     /**
-     * Render Bar Chart (Days of week or Months)
+     * "On This Day": films logged on today's date in previous years
+     */
+    function renderOnThisDay() {
+        const container = document.getElementById('lbst-onthisday');
+        if (!container) return;
+        container.innerHTML = '';
+
+        const ctx = getDiaryContext();
+        const onThisDay = computeOnThisDay(currentEntries);
+        document.getElementById('lbst-onthisday-title').textContent = `On This Day • ${onThisDay.label}`;
+
+        if (onThisDay.years.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'lbst-onthisday-empty';
+            // On a /for/YYYY/ page only that year is loaded until "All Time" is picked
+            const fullDiaryLoaded = !(ctx && ctx.urlYear) || cachedDiaryPath === `${ctx.baseUrl.replace(/for\/.*$/i, '')}::null`;
+            empty.textContent = fullDiaryLoaded
+                ? `Nothing logged on ${onThisDay.label} in previous years.`
+                : `Select “All Time” to look back at previous years.`;
+            container.appendChild(empty);
+            return;
+        }
+
+        const currentYear = new Date().getFullYear();
+        onThisDay.years.forEach(({ year, films }) => {
+            const row = document.createElement('div');
+            row.className = 'lbst-onthisday-row';
+
+            const yearEl = document.createElement('div');
+            yearEl.className = 'lbst-onthisday-year';
+            const ago = currentYear - year;
+            yearEl.innerHTML = `<strong>${year}</strong><span>${ago} year${ago === 1 ? '' : 's'} ago</span>`;
+
+            const filmsEl = document.createElement('div');
+            filmsEl.className = 'lbst-onthisday-films';
+            films.forEach(f => {
+                const chip = document.createElement('span');
+                chip.className = 'lbst-onthisday-film';
+                chip.textContent = f.title;
+                if (f.rating) {
+                    const stars = document.createElement('span');
+                    stars.className = 'lbst-onthisday-stars';
+                    stars.textContent = formatStars(f.rating);
+                    chip.appendChild(stars);
+                }
+                filmsEl.appendChild(chip);
+            });
+
+            row.appendChild(yearEl);
+            row.appendChild(filmsEl);
+            container.appendChild(row);
+        });
+    }
+
+    /**
+     * Render Bar Chart (Days of week, Months, Ratings or Release decades)
      */
     function renderBarChart(stats) {
         const container = document.getElementById('lbst-chart-container');
@@ -2034,9 +2250,26 @@
         container.innerHTML = '';
 
         const tooltip = document.getElementById('lbst-floating-tooltip');
-        const isDays = currentChartMode === 'days';
-        const dataset = isDays ? stats.dayStats : stats.monthStats;
-        const total = stats.totalFilms || 1;
+        const modes = {
+            days: { dataset: stats.dayStats, total: stats.totalFilms, ofLabel: 'of total' },
+            months: { dataset: stats.monthStats, total: stats.totalFilms, ofLabel: 'of total' },
+            ratings: { dataset: stats.ratingStats, total: stats.ratedCount, ofLabel: 'of rated films', empty: 'No rated films in this period.' },
+            decades: { dataset: stats.decadeStats, total: stats.datedFilmsCount, ofLabel: 'of films', empty: 'No release years found in this period.' }
+        };
+        const mode = modes[currentChartMode] || modes.days;
+        const dataset = mode.dataset;
+        const total = mode.total || 1;
+
+        container.classList.toggle('-dense', dataset.length > 12);
+
+        if (mode.empty && !mode.total) {
+            const empty = document.createElement('div');
+            empty.className = 'lbst-chart-empty';
+            empty.textContent = mode.empty;
+            container.appendChild(empty);
+            return;
+        }
+
         const maxVal = Math.max(...dataset.map(d => d.count), 1);
 
         dataset.forEach(item => {
@@ -2071,7 +2304,7 @@
                 if (pinnedTooltipCell) return;
                 tooltip.innerHTML = `
                     <div class="lbst-tooltip-date">${item.name}</div>
-                    <div class="lbst-tooltip-count">${item.count} film${item.count === 1 ? '' : 's'} (${pct}% of total)</div>
+                    <div class="lbst-tooltip-count">${item.count} film${item.count === 1 ? '' : 's'} (${pct}% ${mode.ofLabel})</div>
                 `;
                 tooltip.style.display = 'block';
                 positionFloatingTooltip(e);
@@ -2248,12 +2481,6 @@
         return null;
     }
 
-    async function fetchFollowPage(url) {
-        const res = await fetch(url, { credentials: 'same-origin' });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return new DOMParser().parseFromString(await res.text(), 'text/html');
-    }
-
     /**
      * Fetch every member of /user/following/ or /user/followers/
      */
@@ -2262,7 +2489,7 @@
         const members = new Map();
         const addAll = (list) => list.forEach(m => members.set(m.username, m));
 
-        const firstDoc = await fetchFollowPage(basePath);
+        const firstDoc = await fetchDocument(basePath);
         addAll(extractMembersFromDoc(firstDoc));
 
         const total = detectFollowCount(firstDoc, username, kind);
@@ -2278,7 +2505,7 @@
             for (let p = 2; p <= totalPages; p += BATCH_SIZE) {
                 const batch = [];
                 for (let n = p; n < p + BATCH_SIZE && n <= totalPages; n++) batch.push(n);
-                const docs = await Promise.all(batch.map(n => fetchFollowPage(`${basePath}page/${n}/`)));
+                const docs = await Promise.all(batch.map(n => fetchDocument(`${basePath}page/${n}/`)));
                 docs.forEach(doc => addAll(extractMembersFromDoc(doc)));
                 onProgress?.(Math.min(p + BATCH_SIZE - 1, totalPages), totalPages);
             }
@@ -2291,7 +2518,7 @@
                 if (!next) break;
                 page++;
                 onProgress?.(page, null);
-                doc = await fetchFollowPage(next.getAttribute('href'));
+                doc = await fetchDocument(next.getAttribute('href'));
                 addAll(extractMembersFromDoc(doc));
             }
         }
@@ -2599,31 +2826,411 @@
         });
     }
 
+    /* ==========================================================================
+       Letterboxd Taste Compatibility (compare ratings with another member)
+       ========================================================================== */
+
+    const MAX_FILM_PAGES = 150; // 72 films per page: ~10,800 films per member
+
+    const memberFilmsCache = new Map(); // films page URL -> Map(slug -> film)
+    let isFetchingCompat = false;
+    let currentCompatData = null; // { friend, me, ...computeCompatibility() }
+    let currentCompatTab = 'both-loved'; // 'both-loved', 'disagree' or 'recommend'
+
+    /**
+     * Someone else's profile page (/dave/) while logged in
+     */
+    function isCompatPage() {
+        return getCompatContext() !== null;
+    }
+
+    function getCompatContext() {
+        if (!document.body || !document.body.classList.contains('screen-member-profile')) return null;
+        const friend = document.body.getAttribute('data-owner') || (window.location.pathname.match(/^\/([^\/]+)\/?$/) || [])[1];
+        const me = getLoggedInUsername();
+        if (!friend || !me || friend.toLowerCase() === me) return null;
+        return { friend, me };
+    }
+
+    function extractMemberFilmsFromDoc(doc) {
+        const films = [];
+        doc.querySelectorAll('ul.grid li.griditem, ul.poster-list li.posteritem, ul.poster-list li.poster-container').forEach(li => {
+            const poster = li.querySelector('[data-item-slug], [data-film-slug]');
+            if (!poster) return;
+
+            const slug = poster.getAttribute('data-item-slug') || poster.getAttribute('data-film-slug');
+            const fullName = poster.getAttribute('data-item-name') || poster.getAttribute('data-film-name') || slug;
+            const ratingMatch = li.querySelector('.poster-viewingdata .rating')?.className.match(/rated-(\d+)/);
+
+            films.push({
+                slug,
+                name: fullName.replace(/\s*\(\d{4}\)\s*$/, ''),
+                year: (fullName.match(/\((\d{4})\)\s*$/) || [])[1] || '',
+                link: `https://letterboxd.com${poster.getAttribute('data-item-link') || `/film/${slug}/`}`,
+                rating: ratingMatch ? parseInt(ratingMatch[1], 10) : null
+            });
+        });
+        return films;
+    }
+
+    /**
+     * Every film a member has watched (/user/films/) or only those they rated (/user/films/rated/.5-5/)
+     */
+    async function fetchMemberFilms(username, ratedOnly, onProgress) {
+        const baseUrl = `/${username}/films/${ratedOnly ? 'rated/.5-5/' : ''}`;
+        if (memberFilmsCache.has(baseUrl)) return memberFilmsCache.get(baseUrl);
+
+        const films = new Map();
+        const addAll = (list) => list.forEach(f => films.set(f.slug, f));
+
+        const firstDoc = await fetchDocument(baseUrl);
+        const totalPages = detectTotalPages(firstDoc);
+        if (totalPages > MAX_FILM_PAGES) {
+            throw Object.assign(new Error(`@${username} has too many films to compare (limit is about ${(MAX_FILM_PAGES * 72).toLocaleString('en-US')}).`), { userFacing: true });
+        }
+
+        addAll(extractMemberFilmsFromDoc(firstDoc));
+        onProgress?.(1, totalPages);
+
+        const pageUrl = pageUrlFor(firstDoc, baseUrl);
+        const BATCH_SIZE = 5;
+        for (let p = 2; p <= totalPages; p += BATCH_SIZE) {
+            const batch = [];
+            for (let n = p; n < p + BATCH_SIZE && n <= totalPages; n++) batch.push(n);
+            const docs = await Promise.all(batch.map(n => fetchDocument(pageUrl(n))));
+            docs.forEach(doc => addAll(extractMemberFilmsFromDoc(doc)));
+            onProgress?.(Math.min(p + BATCH_SIZE - 1, totalPages), totalPages);
+        }
+
+        memberFilmsCache.set(baseUrl, films);
+        return films;
+    }
+
+    /**
+     * Ratings are half-stars (1..10). The score drops 40 points per star of average gap:
+     * identical ratings = 100%, 1★ apart on average = 60%, 2.5★ apart or more = 0%.
+     */
+    function computeCompatibility(myFilms, theirRatedFilms) {
+        const common = [];
+        theirRatedFilms.forEach((theirs, slug) => {
+            const mine = myFilms.get(slug);
+            if (mine && mine.rating && theirs.rating) {
+                common.push({ ...theirs, myRating: mine.rating, theirRating: theirs.rating, gap: Math.abs(mine.rating - theirs.rating) });
+            }
+        });
+
+        const avgGap = common.length > 0 ? common.reduce((sum, f) => sum + f.gap, 0) / common.length / 2 : null;
+        const score = avgGap === null ? null : Math.max(0, Math.min(100, Math.round(100 - avgGap * 40)));
+        const bySum = (a, b) => (b.myRating + b.theirRating) - (a.myRating + a.theirRating);
+
+        return {
+            common,
+            avgGap,
+            score,
+            bothLoved: common.filter(f => f.myRating >= 8 && f.theirRating >= 8).sort(bySum),
+            disagreements: common.filter(f => f.gap >= 3).sort((a, b) => b.gap - a.gap || bySum(a, b)),
+            // Their 4★+ films you have never logged
+            recommendations: [...theirRatedFilms.values()].filter(f => f.rating >= 8 && !myFilms.has(f.slug)).sort((a, b) => b.rating - a.rating)
+        };
+    }
+
+    function compatLabel(score) {
+        if (score >= 85) return 'Soulmates';
+        if (score >= 70) return 'Great match';
+        if (score >= 55) return 'Good match';
+        if (score >= 40) return 'Some common ground';
+        return 'Opposite tastes';
+    }
+
+    const SVG_COMPAT_ICON = `
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none">
+            <circle cx="9" cy="12" r="6" stroke="#ff8000" stroke-width="1.8"/>
+            <circle cx="15" cy="12" r="6" stroke="#40bcf4" stroke-width="1.8"/>
+            <path d="M12 7.2a6 6 0 0 1 0 9.6a6 6 0 0 1 0-9.6z" fill="#00e054"/>
+        </svg>
+    `;
+
+    function injectCompatButton() {
+        if (document.getElementById('lbcp-compat-btn')) return;
+        const ctx = getCompatContext();
+        if (!ctx) return;
+
+        const btn = document.createElement('button');
+        btn.id = 'lbcp-compat-btn';
+        btn.setAttribute('aria-label', `Taste compatibility with @${ctx.friend}`);
+        btn.innerHTML = `
+            ${SVG_COMPAT_ICON}
+            <div id="lbcp-compat-tooltip">Taste compatibility</div>
+        `;
+        btn.addEventListener('click', openCompatModal);
+        document.body.appendChild(btn);
+    }
+
+    function removeCompatButton() {
+        document.getElementById('lbcp-compat-btn')?.remove();
+    }
+
+    function injectCompatModal() {
+        if (document.getElementById('lbcp-modal-overlay')) return;
+
+        const overlay = document.createElement('div');
+        overlay.id = 'lbcp-modal-overlay';
+        overlay.innerHTML = `
+            <div id="lbcp-modal-container">
+                <div class="lbst-modal-header">
+                    <div class="lbst-header-title-box">
+                        <div class="lbrnd-letterboxd-dots">
+                            <span class="lbrnd-dot lbrnd-dot-orange"></span>
+                            <span class="lbrnd-dot lbrnd-dot-green"></span>
+                            <span class="lbrnd-dot lbrnd-dot-cyan"></span>
+                        </div>
+                        <div>
+                            <h3 class="lbst-header-title">Taste Compatibility</h3>
+                            <p class="lbst-header-subtitle" id="lbcp-header-sub">Loading...</p>
+                        </div>
+                    </div>
+                    <div class="lbst-header-controls">
+                        <button class="lbrnd-btn-icon" id="lbcp-modal-close" title="Close (Esc)">✕</button>
+                    </div>
+                </div>
+
+                <div id="lbcp-loading-state">
+                    <div class="lbst-spinner"></div>
+                    <div class="lbst-loading-text" id="lbcp-loading-status">Loading ratings...</div>
+                    <div class="lbst-progress-bar-wrap">
+                        <div class="lbst-progress-bar-fill" id="lbcp-progress-fill"></div>
+                    </div>
+                </div>
+
+                <div class="lbst-modal-body" id="lbcp-content-view" style="display: none;">
+                    <div class="lbcp-score-row">
+                        <div class="lbcp-score-ring" id="lbcp-score-ring"><span id="lbcp-score-value">-</span></div>
+                        <div class="lbcp-score-text">
+                            <span class="lbcp-score-label" id="lbcp-score-label">-</span>
+                            <span class="lbcp-score-sub" id="lbcp-score-sub"></span>
+                        </div>
+                    </div>
+                    <div class="lbst-section-header">
+                        <div class="lbst-toggle-group" id="lbcp-tabs">
+                            <button class="lbst-toggle-btn" data-tab="both-loved"></button>
+                            <button class="lbst-toggle-btn" data-tab="disagree"></button>
+                            <button class="lbst-toggle-btn" data-tab="recommend"></button>
+                        </div>
+                    </div>
+                    <p class="lbfl-tab-desc" id="lbcp-tab-desc"></p>
+                    <div class="lbcp-film-list" id="lbcp-film-list"></div>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        document.getElementById('lbcp-modal-close').addEventListener('click', closeCompatModal);
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) closeCompatModal();
+        });
+
+        overlay.querySelectorAll('#lbcp-tabs .lbst-toggle-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                currentCompatTab = btn.dataset.tab;
+                renderCompatResults();
+            });
+        });
+
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && overlay.classList.contains('active')) {
+                closeCompatModal();
+            }
+        });
+    }
+
+    function openCompatModal() {
+        const ctx = getCompatContext();
+        if (!ctx) return;
+
+        injectCompatModal();
+        document.getElementById('lbcp-modal-overlay').classList.add('active');
+        loadCompatData(ctx);
+    }
+
+    function closeCompatModal() {
+        document.getElementById('lbcp-modal-overlay')?.classList.remove('active');
+    }
+
+    async function loadCompatData(ctx) {
+        const loadingView = document.getElementById('lbcp-loading-state');
+        const contentView = document.getElementById('lbcp-content-view');
+        const statusText = document.getElementById('lbcp-loading-status');
+        const progressFill = document.getElementById('lbcp-progress-fill');
+
+        document.getElementById('lbcp-header-sub').textContent = `@${ctx.me} × @${ctx.friend}`;
+
+        if (currentCompatData && currentCompatData.friend.toLowerCase() === ctx.friend.toLowerCase()) {
+            loadingView.style.display = 'none';
+            contentView.style.display = 'flex';
+            renderCompatResults();
+            return;
+        }
+        if (isFetchingCompat) return;
+        isFetchingCompat = true;
+
+        loadingView.style.display = 'flex';
+        loadingView.classList.remove('is-message');
+        contentView.style.display = 'none';
+        progressFill.style.width = '5%';
+
+        // Their ratings fill the first half of the bar, your films the second half
+        const progressFor = (step, label) => (loaded, total) => {
+            progressFill.style.width = `${Math.max(5, Math.round((step + loaded / total) * 50))}%`;
+            statusText.textContent = `Loading ${label}... (page ${loaded}/${total})`;
+        };
+
+        try {
+            statusText.textContent = `Loading @${ctx.friend}'s ratings...`;
+            const theirRated = await fetchMemberFilms(ctx.friend, true, progressFor(0, `@${ctx.friend}'s ratings`));
+            statusText.textContent = 'Loading your films...';
+            const myFilms = await fetchMemberFilms(ctx.me, false, progressFor(1, 'your films'));
+
+            currentCompatData = { friend: ctx.friend, me: ctx.me, ...computeCompatibility(myFilms, theirRated) };
+            loadingView.style.display = 'none';
+            contentView.style.display = 'flex';
+            renderCompatResults();
+        } catch (err) {
+            statusText.textContent = err && err.userFacing ? err.message : 'Unable to load ratings. Please try again.';
+            loadingView.classList.add('is-message');
+        } finally {
+            isFetchingCompat = false;
+        }
+    }
+
+    function renderCompatResults() {
+        if (!currentCompatData) return;
+        const { friend, common, avgGap, score, bothLoved, disagreements, recommendations } = currentCompatData;
+
+        // Score
+        const ring = document.getElementById('lbcp-score-ring');
+        ring.style.setProperty('--lbcp-score', score === null ? 0 : score);
+        document.getElementById('lbcp-score-value').textContent = score === null ? '-' : `${score}%`;
+        document.getElementById('lbcp-score-label').textContent = score === null ? 'No films rated by both of you' : compatLabel(score);
+        document.getElementById('lbcp-score-sub').textContent = score === null
+            ? `Rate some of the films @${friend} rated to get a score.`
+            : `Based on ${common.length.toLocaleString('en-US')} film${common.length === 1 ? '' : 's'} you both rated • ${avgGap.toFixed(1)}★ apart on average${common.length < 10 ? ' (few films, rough estimate)' : ''}`;
+
+        // Tabs
+        const tabs = {
+            'both-loved': { films: bothLoved, label: `Both loved (${bothLoved.length})`, desc: `Films you and @${friend} both rated ★★★★ or more.`, empty: 'No film you both rated ★★★★ or more yet.' },
+            'disagree': { films: disagreements, label: `Disagreements (${disagreements.length})`, desc: `Films where your ratings are at least 1.5★ apart.`, empty: 'You never disagree by 1.5★ or more. Impressive.' },
+            'recommend': { films: recommendations, label: `Their picks for you (${recommendations.length})`, desc: `Films @${friend} rated ★★★★ or more that you haven't logged.`, empty: `You've seen every film @${friend} rated ★★★★ or more.` }
+        };
+        document.querySelectorAll('#lbcp-tabs .lbst-toggle-btn').forEach(btn => {
+            btn.textContent = tabs[btn.dataset.tab].label;
+            btn.classList.toggle('active', btn.dataset.tab === currentCompatTab);
+        });
+
+        const tab = tabs[currentCompatTab];
+        document.getElementById('lbcp-tab-desc').textContent = tab.desc;
+
+        const container = document.getElementById('lbcp-film-list');
+        container.innerHTML = '';
+
+        if (tab.films.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'lbfl-empty';
+            empty.textContent = tab.empty;
+            container.appendChild(empty);
+            return;
+        }
+
+        const MAX_ROWS = 200;
+        tab.films.slice(0, MAX_ROWS).forEach(f => {
+            const row = document.createElement('a');
+            row.className = 'lbcp-film';
+            row.href = f.link;
+            row.target = '_blank';
+            row.rel = 'noopener';
+
+            const title = document.createElement('span');
+            title.className = 'lbcp-film-title';
+            title.textContent = f.name;
+            if (f.year) {
+                const year = document.createElement('span');
+                year.className = 'lbcp-film-year';
+                year.textContent = f.year;
+                title.appendChild(year);
+            }
+
+            const ratings = document.createElement('span');
+            ratings.className = 'lbcp-film-ratings';
+            const addRating = (who, value, cls) => {
+                const el = document.createElement('span');
+                el.className = `lbcp-rating ${cls}`;
+                el.innerHTML = `<span class="lbcp-rating-who"></span><span class="lbcp-rating-stars"></span>`;
+                el.firstChild.textContent = who;
+                el.lastChild.textContent = formatStars(value);
+                ratings.appendChild(el);
+            };
+            if (currentCompatTab !== 'recommend') addRating('You', f.myRating, '-me');
+            addRating(`@${friend}`, currentCompatTab === 'recommend' ? f.rating : f.theirRating, '-them');
+
+            row.appendChild(title);
+            row.appendChild(ratings);
+            container.appendChild(row);
+        });
+
+        if (tab.films.length > MAX_ROWS) {
+            const more = document.createElement('div');
+            more.className = 'lbfl-empty';
+            more.textContent = `+ ${(tab.films.length - MAX_ROWS).toLocaleString('en-US')} more`;
+            container.appendChild(more);
+        }
+    }
+
+    /* ==========================================================================
+       Feature switches (popup) & page button switcher
+       ========================================================================== */
+
+    // Every feature is on unless switched off in the popup
+    const DEFAULT_FEATURES = { picker: true, stats: true, follow: true, compat: true };
+    let enabledFeatures = { ...DEFAULT_FEATURES };
+
+    const PAGE_FEATURES = [
+        { key: 'picker', matches: isPickablePage, inject: injectFloatingButton, remove: removeWatchlistButton },
+        { key: 'stats', matches: isDiaryPage, inject: injectStatsButton, remove: removeStatsButton },
+        { key: 'follow', matches: isFollowPage, inject: injectFollowButton, remove: removeFollowButton },
+        { key: 'compat', matches: isCompatPage, inject: injectCompatButton, remove: removeCompatButton }
+    ];
+
     /**
      * SPA navigation watcher & Button switcher
      */
     function updatePageButtons() {
-        if (isWatchlistPage()) {
-            removeStatsButton();
-            removeFollowButton();
-            injectFloatingButton();
-        } else if (isDiaryPage()) {
-            removeWatchlistButton();
-            removeFollowButton();
-            injectStatsButton();
-        } else if (isFollowPage()) {
-            removeWatchlistButton();
-            removeStatsButton();
-            injectFollowButton();
-        } else {
-            removeWatchlistButton();
-            removeStatsButton();
-            removeFollowButton();
+        PAGE_FEATURES.forEach(feature => {
+            if (enabledFeatures[feature.key] !== false && feature.matches()) {
+                feature.inject();
+            } else {
+                feature.remove();
+            }
+        });
+    }
+
+    function loadFeatureSettings(callback) {
+        if (!extStorage) {
+            callback();
+            return;
         }
+        extStorage.get('lbc_features', (res) => {
+            enabledFeatures = { ...DEFAULT_FEATURES, ...((res && res.lbc_features) || {}) };
+            callback();
+        });
+        chrome.storage.onChanged.addListener((changes, area) => {
+            if (area === 'local' && changes.lbc_features) {
+                enabledFeatures = { ...DEFAULT_FEATURES, ...(changes.lbc_features.newValue || {}) };
+                updatePageButtons();
+            }
+        });
     }
 
     function init() {
-        updatePageButtons();
+        loadFeatureSettings(updatePageButtons);
 
         let lastUrl = window.location.href;
         const observer = new MutationObserver(() => {

@@ -2,6 +2,14 @@
 
 A sleek, lightweight browser extension designed with **Letterboxd's authentic UI** that picks random movies from any watchlist with a smooth carousel animation, and visualizes your diary activity with GitHub-style heatmaps and comprehensive viewing statistics. On any Following / Followers page, it also shows who doesn't follow back (and who you don't follow back).
 
+## ✨ Features
+
+- **Random picker** on any watchlist **or list**. On a friend's watchlist, pick only among the films you **both** want to see; on a list, only among the ones already in your watchlist.
+- **Diary statistics**: activity heatmap, streaks, average rating, rewatches, likes, reviews, distribution by day, month, rating and release decade, plus **On This Day** (what you watched on this date in previous years).
+- **Follow check**: who doesn't follow back and who you don't follow back, with Follow / Unfollow buttons on your own lists.
+- **Taste compatibility**: on another member's profile, a match score based on the films you both rated, the films you both loved, your biggest disagreements, and their favorites you haven't seen yet.
+- **Settings** in the extension popup to switch each feature on or off.
+
 
 ---
 
