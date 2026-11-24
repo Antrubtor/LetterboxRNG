@@ -6,7 +6,7 @@ A sleek, lightweight browser extension designed with **Letterboxd's authentic UI
 
 - **Random picker** on any watchlist **or list**. On a friend's watchlist, pick only among the films you **both** want to see; on a list, only among the ones already in your watchlist.
 - **Diary statistics**: watch time (hours spent watching, from each film's runtime), activity heatmap, streaks, average rating, rewatches, likes, reviews, distribution by day, month, rating and release decade, plus **On This Day** (what you watched on this date in previous years). View all time, one year, or any custom date range.
-- **Film statistics** on any member's Films page (and its filters, e.g. a genre or decade): watch time, average rating, likes, reviews, distribution by rating and release decade.
+- **Film statistics** on any member's Films page (and its filters, e.g. a genre or decade): watch time, average rating, likes, reviews, distribution by rating and release decade. Tick **Count rewatches** to count every viewing logged in the diary in the total and the watch time.
 - **Follow check**: who doesn't follow back and who you don't follow back, with Follow / Unfollow buttons on your own lists.
 - **Taste compatibility**: on another member's profile, a match score based on the films you both rated, the films you both loved, your biggest disagreements, and their favorites you haven't seen yet.
 - **Settings** in the extension popup to switch each feature on or off.

@@ -931,8 +931,34 @@
 }
 
 /* Films page stats: no watch dates, so no heatmap, streaks, On This Day or year picker */
-#lbst-modal-overlay.is-films-mode [data-diary-only] {
+#lbst-modal-overlay.is-films-mode [data-diary-only],
+#lbst-modal-overlay:not(.is-films-mode) [data-films-only] {
     display: none !important;
+}
+
+/* "Count rewatches" option (films page) */
+.lbst-check {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: #99aabb;
+    cursor: pointer;
+    user-select: none;
+    transition: color 0.15s ease;
+}
+
+.lbst-check:hover {
+    color: #ffffff;
+}
+
+.lbst-check input {
+    width: 14px;
+    height: 14px;
+    margin: 0;
+    accent-color: #00e054;
+    cursor: pointer;
 }
 
 .lbst-year-select {

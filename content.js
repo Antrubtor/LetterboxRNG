@@ -1032,6 +1032,16 @@
     let currentEntries = []; // diary entries, or watched films in 'films' mode
     let currentSelectedYear = null; // 'all', a year (number) or 'range'
     let currentRange = null; // { from: 'YYYY-MM-DD', to: 'YYYY-MM-DD' } when currentSelectedYear is 'range'
+
+    // Films page "Count rewatches" option: times each film was watched, read from the member's diary
+    let countRewatches = false;
+    try { countRewatches = localStorage.getItem('lbc_count_rewatches') === 'true'; } catch (e) {}
+    let currentFilmsCtx = null;
+    let filmViews = null; // slug -> times watched
+    let filmViewsUser = '';
+    let filmViewsMissingPages = 0;
+    let filmViewsError = false;
+    let isFetchingFilmViews = false;
     let currentStatsData = null;
     let currentChartMode = 'days'; // 'days', 'months', 'ratings' or 'decades'
 
@@ -1201,17 +1211,18 @@
         let untimedEntries = 0;
 
         targetEntries.forEach(e => {
+            const views = viewsOf(e);
             if (!e.slug) {
-                untimedEntries++;
+                untimedEntries += views;
                 return;
             }
             films.add(e.slug);
             const runtime = filmRuntimes.get(e.slug);
             if (runtime > 0) {
-                minutes += runtime;
-                timedEntries++;
+                minutes += runtime * views;
+                timedEntries += views;
             } else if (runtime === 0 || failedRuntimeSlugs.has(e.slug)) {
-                untimedEntries++;
+                untimedEntries += views;
             } else {
                 pendingFilms.add(e.slug);
             }
@@ -1516,6 +1527,56 @@
 
     function isFilmsPage() {
         return getFilmsContext() !== null;
+    }
+
+    /**
+     * A member's whole diary, from any page (shares the diary cache with the diary stats)
+     */
+    async function fetchDiaryForUser(username, onProgress) {
+        const basePath = `/${username}/diary/`;
+        const cacheKey = `${basePath}::null`; // same key as fetchEntireDiary on /member/diary/
+        if (cachedDiaryEntries && cachedDiaryPath === cacheKey) {
+            return { entries: cachedDiaryEntries, failedPages: 0 };
+        }
+        const { items, failedPages } = await fetchAllPages(basePath, (doc) => extractDiaryEntriesFromDoc(doc, null), onProgress);
+        if (failedPages === 0) {
+            cachedDiaryEntries = items;
+            cachedDiaryPath = cacheKey;
+        }
+        return { entries: items, failedPages };
+    }
+
+    /**
+     * Times each film was watched: its diary entries, plus one when its first entry is marked as a
+     * rewatch (it was seen before being logged). Films with no diary entry count once.
+     */
+    function computeFilmViews(diaryEntries) {
+        const bySlug = new Map();
+        diaryEntries.forEach(e => {
+            if (!e.slug) return;
+            const info = bySlug.get(e.slug) || { count: 0, firstDate: null, firstIsRewatch: false };
+            info.count++;
+            if (!info.firstDate || e.date < info.firstDate) {
+                info.firstDate = e.date;
+                info.firstIsRewatch = e.rewatch;
+            }
+            bySlug.set(e.slug, info);
+        });
+
+        const views = new Map();
+        bySlug.forEach((info, slug) => views.set(slug, info.count + (info.firstIsRewatch ? 1 : 0)));
+        return views;
+    }
+
+    // "Count rewatches" is on and the views come from this member's diary
+    function filmViewsReady() {
+        return statsMode === 'films' && countRewatches && !!filmViews && !!currentFilmsCtx &&
+            filmViewsUser === currentFilmsCtx.username.toLowerCase();
+    }
+
+    // Weight of an entry in totals and watch time: 1, or the film's views on the films page with "Count rewatches"
+    function viewsOf(entry) {
+        return filmViewsReady() ? Math.max(1, filmViews.get(entry.slug) || 1) : 1;
     }
 
     async function fetchWatchedFilms(baseUrl, onProgress) {
@@ -1902,6 +1963,7 @@
         return {
             kind: 'films',
             totalFilms: films.length,
+            totalViews: films.reduce((sum, f) => sum + viewsOf(f), 0), // = totalFilms unless rewatches are counted
             totalWeeks: null,
             ...computeTasteStats(films)
         };
@@ -2001,6 +2063,10 @@
                         </div>
                     </div>
                     <div class="lbst-header-controls">
+                        <label class="lbst-check" data-films-only title="Count every time a film was watched, from the member's diary">
+                            <input type="checkbox" id="lbst-rewatch-toggle">
+                            <span>Count rewatches</span>
+                        </label>
                         <div class="lbst-range-inputs" id="lbst-range-inputs" data-diary-only hidden>
                             <input type="date" class="lbst-date-input" id="lbst-range-from" aria-label="From">
                             <span class="lbst-range-sep">→</span>
@@ -2203,6 +2269,14 @@
             }
             currentSelectedYear = value === 'all' || value === 'range' ? value : parseInt(value, 10);
             updateStatsForSelectedYear();
+        });
+
+        const rewatchToggle = document.getElementById('lbst-rewatch-toggle');
+        rewatchToggle.checked = countRewatches;
+        rewatchToggle.addEventListener('change', () => {
+            countRewatches = rewatchToggle.checked;
+            try { localStorage.setItem('lbc_count_rewatches', countRewatches ? 'true' : 'false'); } catch (e) {}
+            applyRewatchOption();
         });
 
         const fromInput = document.getElementById('lbst-range-from');
@@ -2438,18 +2512,53 @@
         currentEntries = films;
         currentSelectedYear = 'all';
         currentRange = null;
+        currentFilmsCtx = ctx;
         showStatsContent();
 
         const stats = computeFilmsStats(films);
         currentStatsData = stats;
-
-        const subEl = document.getElementById('lbst-header-sub');
         document.getElementById('lbst-header-title').textContent = ctx.filter ? `Film Statistics • ${ctx.filter}` : 'Film Statistics';
-        subEl.textContent = `@${ctx.username} • ${stats.totalFilms.toLocaleString('en-US')} film${stats.totalFilms === 1 ? '' : 's'} watched`;
-        appendMissingPagesWarning(subEl);
 
         renderFilmStatsUI(stats);
         requestRuntimesForCurrentView();
+        if (countRewatches) applyRewatchOption();
+    }
+
+    /**
+     * "Count rewatches" switched on or off. The first time on, the member's diary is loaded in the
+     * background (the stats stay on screen); after that switching is instant.
+     */
+    async function applyRewatchOption() {
+        if (statsMode !== 'films' || !currentFilmsCtx || !currentStatsData) return;
+        const username = currentFilmsCtx.username.toLowerCase();
+        const needsDiary = countRewatches && filmViewsUser !== username && !isFetchingFilmViews;
+
+        refreshFilmTotals(); // instant when the diary is already there, "loading diary..." otherwise
+        if (!needsDiary) return;
+
+        isFetchingFilmViews = true;
+        filmViewsError = false;
+        try {
+            const { entries, failedPages } = await fetchDiaryForUser(currentFilmsCtx.username, (loaded, total) => {
+                if (countRewatches && !filmViewsReady()) {
+                    document.getElementById('lbst-metric-avg').textContent = `loading diary... ${loaded}/${total} pages`;
+                }
+            });
+            filmViews = computeFilmViews(entries);
+            filmViewsUser = username;
+            filmViewsMissingPages = failedPages;
+        } catch (err) {
+            filmViewsError = true; // switching the option off and on again retries
+        } finally {
+            isFetchingFilmViews = false;
+        }
+        refreshFilmTotals();
+    }
+
+    function refreshFilmTotals() {
+        if (statsMode !== 'films' || !currentStatsData) return;
+        currentStatsData = computeFilmsStats(currentEntries);
+        updateFilmTotals(currentStatsData, false);
     }
 
     function escapeHtml(str) {
@@ -2529,15 +2638,46 @@
      * Films page: watch time, the shared cards and the Ratings / Decades chart (no dates, so no heatmap)
      */
     function renderFilmStatsUI(stats) {
-        document.getElementById('lbst-metric-total-label').textContent = 'Films Watched';
-        document.getElementById('lbst-metric-total').textContent = stats.totalFilms.toLocaleString('en-US');
-        document.getElementById('lbst-metric-avg').textContent = 'each film counted once';
         fillTasteMetrics(stats);
-        renderWatchTime({ fromZero: true });
+        updateFilmTotals(stats, true);
 
         unpinTooltip();
         if (currentChartMode === 'days' || currentChartMode === 'months') setChartMode('ratings');
         renderBarChart(stats);
+    }
+
+    /**
+     * Films page totals that depend on "Count rewatches": first card, header and watch time
+     * (ratings, likes, reviews and decades stay per film)
+     */
+    function updateFilmTotals(stats, fromZero) {
+        const fmt = (n) => n.toLocaleString('en-US');
+        const withRewatches = filmViewsReady();
+        const rewatches = stats.totalViews - stats.totalFilms;
+
+        document.getElementById('lbst-metric-total-label').textContent = withRewatches ? 'Viewings' : 'Films Watched';
+        document.getElementById('lbst-metric-total').textContent = fmt(withRewatches ? stats.totalViews : stats.totalFilms);
+        let sub = 'each film counted once';
+        if (countRewatches && !withRewatches) {
+            sub = filmViewsError ? "couldn't load the diary" : 'loading diary...';
+        } else if (withRewatches) {
+            sub = `${fmt(stats.totalFilms)} films + ${fmt(rewatches)} rewatch${rewatches === 1 ? '' : 'es'}`;
+        }
+        document.getElementById('lbst-metric-avg').textContent = sub;
+
+        const ctx = currentFilmsCtx;
+        const subEl = document.getElementById('lbst-header-sub');
+        subEl.textContent = `@${ctx.username} • ${fmt(stats.totalFilms)} film${stats.totalFilms === 1 ? '' : 's'} watched` +
+            (withRewatches ? ` • ${fmt(stats.totalViews)} viewing${stats.totalViews === 1 ? '' : 's'}` : '');
+        appendMissingPagesWarning(subEl);
+        if (withRewatches && filmViewsMissingPages > 0) {
+            const warning = document.createElement('span');
+            warning.className = 'lbst-header-warning';
+            warning.textContent = ` • ${filmViewsMissingPages} diary page${filmViewsMissingPages === 1 ? '' : 's'} couldn't be loaded`;
+            subEl.appendChild(warning);
+        }
+
+        renderWatchTime({ fromZero });
     }
 
     /**
