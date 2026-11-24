@@ -173,12 +173,32 @@
     }
 
     /**
-     * Fetch a Letterboxd page and parse it (same-origin, with the user's session)
+     * Fetch a Letterboxd page and parse it (same-origin, with the user's session).
+     * Network errors, 403, 429 and 5xx are retried with a growing delay (1 s, 2 s, 4 s): Letterboxd
+     * answers bursts of parallel page requests with an occasional 403. Other errors (404...) fail right away.
      */
+    const FETCH_RETRY_DELAYS_MS = [1000, 2000, 4000];
+
     async function fetchDocument(url) {
-        const res = await fetch(url, { credentials: 'same-origin' });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return new DOMParser().parseFromString(await res.text(), 'text/html');
+        for (let attempt = 0; ; attempt++) {
+            let res = null;
+            try {
+                res = await fetch(url, { credentials: 'same-origin' });
+            } catch (err) {
+                if (attempt >= FETCH_RETRY_DELAYS_MS.length) throw err;
+            }
+
+            if (res) {
+                if (res.ok) return new DOMParser().parseFromString(await res.text(), 'text/html');
+                const retryable = res.status === 403 || res.status === 429 || res.status >= 500;
+                if (!retryable || attempt >= FETCH_RETRY_DELAYS_MS.length) throw new Error(`HTTP ${res.status}`);
+            }
+
+            // Honour Retry-After (seconds) when the server sends one, within reason
+            const retryAfter = parseInt(res?.headers.get('Retry-After'), 10);
+            const delay = retryAfter > 0 ? Math.min(retryAfter * 1000, 15000) : FETCH_RETRY_DELAYS_MS[attempt];
+            await new Promise(r => setTimeout(r, delay));
+        }
     }
 
     /**
@@ -1004,11 +1024,215 @@
 
     let cachedDiaryEntries = null;
     let cachedDiaryPath = '';
+    let cachedFilms = null; // watched films grid (/member/films/), for the films page stats
+    let cachedFilmsPath = '';
+    let statsMissingPages = 0; // pages of the last diary / films fetch still failing after retries
     let isFetchingDiary = false;
-    let currentEntries = [];
-    let currentSelectedYear = null;
+    let statsMode = 'diary'; // 'diary' (dated entries) or 'films' (watched films grid, no dates)
+    let currentEntries = []; // diary entries, or watched films in 'films' mode
+    let currentSelectedYear = null; // 'all', a year (number) or 'range'
+    let currentRange = null; // { from: 'YYYY-MM-DD', to: 'YYYY-MM-DD' } when currentSelectedYear is 'range'
     let currentStatsData = null;
     let currentChartMode = 'days'; // 'days', 'months', 'ratings' or 'decades'
+
+    /* --------------------------------------------------------------------------
+       Film runtimes (Watch Time stat)
+       The diary pages don't carry runtimes, so each film's /film/<slug>/json/ is fetched once.
+       Runtimes are kept in extension storage, so only films never seen before cost a request.
+       -------------------------------------------------------------------------- */
+
+    const RUNTIME_STORAGE_KEY = 'lbc_runtimes';          // slug -> minutes
+    const RUNTIME_MISSING_KEY = 'lbc_runtimes_missing';  // slug -> time of the check, for films without a runtime
+    const RUNTIME_MISSING_RETRY_MS = 7 * 86400000;       // runtimes get added to new releases later on
+    const RUNTIME_CONCURRENCY = 6;
+    const RUNTIME_MAX_ATTEMPTS = 3;
+
+    const filmRuntimes = new Map(); // slug -> minutes (0 = Letterboxd has no runtime for it)
+    const failedRuntimeSlugs = new Set(); // gave up after RUNTIME_MAX_ATTEMPTS (counted as unknown)
+    const runtimeAttempts = new Map();
+    const inFlightRuntimeSlugs = new Set();
+    let missingRuntimeChecks = {};
+    let runtimeQueue = [];
+    let runtimeWorkers = 0;
+    let runtimePausedUntil = 0; // global backoff after a 429 / 5xx
+    let runtimeStoreReady = null;
+    let runtimeStoreLoaded = false;
+    let runtimePersistTimer = null;
+
+    function loadRuntimeStore() {
+        if (runtimeStoreReady) return runtimeStoreReady;
+        runtimeStoreReady = new Promise((resolve) => {
+            const done = () => {
+                runtimeStoreLoaded = true;
+                resolve();
+            };
+            if (!extStorage) return done();
+            try {
+                extStorage.get([RUNTIME_STORAGE_KEY, RUNTIME_MISSING_KEY], (res) => {
+                    const known = (res && res[RUNTIME_STORAGE_KEY]) || {};
+                    Object.keys(known).forEach(slug => {
+                        if (!filmRuntimes.has(slug)) filmRuntimes.set(slug, known[slug]);
+                    });
+                    const missing = (res && res[RUNTIME_MISSING_KEY]) || {};
+                    const now = Date.now();
+                    Object.keys(missing).forEach(slug => {
+                        if (now - missing[slug] < RUNTIME_MISSING_RETRY_MS && !filmRuntimes.has(slug)) {
+                            filmRuntimes.set(slug, 0);
+                            missingRuntimeChecks[slug] = missing[slug];
+                        }
+                    });
+                    done();
+                });
+            } catch (e) {
+                done(); // extension context invalidated (extension reloaded): memory only
+            }
+        });
+        return runtimeStoreReady;
+    }
+
+    // Debounced write, merged with what other tabs may have stored meanwhile
+    function persistRuntimes() {
+        if (!extStorage || runtimePersistTimer) return;
+        runtimePersistTimer = setTimeout(() => {
+            runtimePersistTimer = null;
+            const known = {};
+            filmRuntimes.forEach((minutes, slug) => {
+                if (minutes > 0) known[slug] = minutes;
+            });
+            try {
+                extStorage.get([RUNTIME_STORAGE_KEY, RUNTIME_MISSING_KEY], (res) => {
+                    const storedMissing = (res && res[RUNTIME_MISSING_KEY]) || {};
+                    const mergedMissing = { ...storedMissing, ...missingRuntimeChecks };
+                    Object.keys(known).forEach(slug => delete mergedMissing[slug]);
+                    extStorage.set({
+                        [RUNTIME_STORAGE_KEY]: { ...((res && res[RUNTIME_STORAGE_KEY]) || {}), ...known },
+                        [RUNTIME_MISSING_KEY]: mergedMissing
+                    });
+                });
+            } catch (e) {}
+        }, 1500);
+    }
+
+    async function fetchFilmRuntime(slug) {
+        // Without these headers the endpoint answers with the regular HTML film page
+        const res = await fetch(`/film/${encodeURIComponent(slug)}/json/`, {
+            credentials: 'same-origin',
+            headers: { 'Accept': 'application/json', 'X-Requested-With': 'XMLHttpRequest' }
+        });
+        if (res.status === 429 || res.status >= 500) {
+            const err = new Error(`HTTP ${res.status}`);
+            err.throttled = true;
+            throw err;
+        }
+        if (!res.ok) return 0; // film removed / renamed: nothing to count
+
+        const text = await res.text();
+        let minutes = null;
+        try {
+            minutes = parseInt(JSON.parse(text).runTime, 10);
+        } catch (e) {
+            // HTML film page: <div class="duration">125&nbsp;mins</div>
+            const m = text.match(/class="(?:duration|text-link text-footer)"[^>]*>\s*([\d,]+)(?:&nbsp;|\s)*mins?/);
+            minutes = m ? parseInt(m[1].replace(/,/g, ''), 10) : 0;
+        }
+        return minutes > 0 ? minutes : 0;
+    }
+
+    /**
+     * Queues the runtimes still unknown among `slugs`, fetching `prioritySlugs` (the period on screen) first
+     */
+    function queueRuntimeFetches(slugs, prioritySlugs) {
+        const wanted = new Set(runtimeQueue);
+        slugs.forEach(slug => {
+            if (slug && !filmRuntimes.has(slug) && !failedRuntimeSlugs.has(slug) && !inFlightRuntimeSlugs.has(slug)) {
+                wanted.add(slug);
+            }
+        });
+        const priority = new Set(prioritySlugs || []);
+        const all = Array.from(wanted);
+        runtimeQueue = all.filter(s => priority.has(s)).concat(all.filter(s => !priority.has(s)));
+
+        while (runtimeWorkers < RUNTIME_CONCURRENCY && runtimeWorkers < runtimeQueue.length) {
+            runtimeWorkers++;
+            runRuntimeWorker();
+        }
+    }
+
+    async function runRuntimeWorker() {
+        while (runtimeQueue.length > 0) {
+            const wait = runtimePausedUntil - Date.now();
+            if (wait > 0) await new Promise(r => setTimeout(r, wait));
+
+            const slug = runtimeQueue.shift();
+            if (!slug) break;
+            if (filmRuntimes.has(slug) || inFlightRuntimeSlugs.has(slug)) continue;
+
+            inFlightRuntimeSlugs.add(slug);
+            try {
+                const minutes = await fetchFilmRuntime(slug);
+                filmRuntimes.set(slug, minutes);
+                if (minutes > 0) delete missingRuntimeChecks[slug];
+                else missingRuntimeChecks[slug] = Date.now();
+                persistRuntimes();
+            } catch (err) {
+                const attempts = (runtimeAttempts.get(slug) || 0) + 1;
+                runtimeAttempts.set(slug, attempts);
+                if (err.throttled) runtimePausedUntil = Math.max(runtimePausedUntil, Date.now() + 2000 * attempts);
+                if (attempts < RUNTIME_MAX_ATTEMPTS) runtimeQueue.push(slug);
+                else failedRuntimeSlugs.add(slug);
+            } finally {
+                inFlightRuntimeSlugs.delete(slug);
+            }
+            scheduleWatchTimeRender();
+        }
+        runtimeWorkers--;
+        scheduleWatchTimeRender();
+    }
+
+    /**
+     * Watch time of the entries of a period. Every diary entry counts, so a rewatch adds its runtime again
+     * (the films page lists each film once).
+     */
+    function computeWatchTime(targetEntries) {
+        const films = new Set();
+        const pendingFilms = new Set();
+        let minutes = 0;
+        let timedEntries = 0;
+        let untimedEntries = 0;
+
+        targetEntries.forEach(e => {
+            if (!e.slug) {
+                untimedEntries++;
+                return;
+            }
+            films.add(e.slug);
+            const runtime = filmRuntimes.get(e.slug);
+            if (runtime > 0) {
+                minutes += runtime;
+                timedEntries++;
+            } else if (runtime === 0 || failedRuntimeSlugs.has(e.slug)) {
+                untimedEntries++;
+            } else {
+                pendingFilms.add(e.slug);
+            }
+        });
+
+        return {
+            minutes,
+            timedEntries,
+            untimedEntries,
+            totalFilms: films.size,
+            pendingFilms: runtimeStoreLoaded ? pendingFilms.size : films.size
+        };
+    }
+
+    function requestRuntimesForCurrentView() {
+        loadRuntimeStore().then(() => {
+            const inPeriod = entriesForSelection(currentEntries);
+            queueRuntimeFetches(currentEntries.map(e => e.slug), inPeriod.map(e => e.slug));
+            renderWatchTime();
+        });
+    }
 
     const MONTH_MAP = {
         'jan': 1, 'janv': 1, 'january': 1, 'janvier': 1,
@@ -1099,6 +1323,12 @@
                                 (posterData?.getAttribute('data-item-name') || '').match(/\((\d{4})\)\s*$/)?.[1] || '';
             const releaseYear = parseInt((releaseText.match(/\d{4}/) || [])[0], 10) || null;
 
+            // Film slug (used to look up the runtime); links look like /film/slug/ or /member/film/slug/1/
+            const slugAttr = posterData?.getAttribute('data-item-slug') || posterData?.getAttribute('data-film-slug') || '';
+            const slugLink = row.querySelector('[data-details-endpoint], [data-item-link], a[href*="/film/"]');
+            const slugHref = slugLink?.getAttribute('data-details-endpoint') || slugLink?.getAttribute('data-item-link') || slugLink?.getAttribute('href') || '';
+            const slug = slugAttr || (slugHref.match(/\/film\/([^\/]+)/) || [])[1] || null;
+
             let entryDate = null;
 
             // 1. Link matching /for/YYYY/MM/DD/ anywhere in href
@@ -1181,7 +1411,8 @@
                     liked,
                     rewatch,
                     review,
-                    releaseYear
+                    releaseYear,
+                    slug
                 });
             }
         });
@@ -1190,7 +1421,47 @@
     }
 
     /**
-     * Fetch complete diary across pagination (fetched in batches of 5 pages)
+     * Every item of a paginated listing, pages fetched in batches of 5 (in page order).
+     * Page 1 is always fetched rather than read from the live page: the server HTML is the same
+     * for every viewer, while the live DOM may already be reworked by Letterboxd's scripts
+     * (e.g. owner-only rating widgets replacing the static stars).
+     * If page 1 still fails after fetchDocument's retries this throws; later pages that still fail
+     * are skipped and counted in `failedPages`.
+     */
+    async function fetchAllPages(baseUrl, extract, onProgress) {
+        const firstDoc = await fetchDocument(baseUrl);
+        const totalPages = detectTotalPages(firstDoc);
+        const pageUrl = pageUrlFor(firstDoc, baseUrl);
+        let items = extract(firstDoc);
+        let failedPages = 0;
+
+        if (totalPages > 1) {
+            onProgress?.(1, totalPages, items.length);
+
+            const BATCH_SIZE = 5;
+            for (let p = 2; p <= totalPages; p += BATCH_SIZE) {
+                const batch = [];
+                for (let n = p; n < p + BATCH_SIZE && n <= totalPages; n++) batch.push(n);
+
+                const results = await Promise.all(batch.map(n =>
+                    fetchDocument(pageUrl(n)).then(extract).catch(() => {
+                        failedPages++;
+                        return [];
+                    })
+                ));
+                results.forEach(pageItems => {
+                    items = items.concat(pageItems);
+                });
+
+                onProgress?.(Math.min(p + BATCH_SIZE - 1, totalPages), totalPages, items.length);
+            }
+        }
+
+        return { items, failedPages };
+    }
+
+    /**
+     * Fetch complete diary across pagination
      */
     async function fetchEntireDiary(customBasePath, fallbackYear, onProgress) {
         const ctx = getDiaryContext();
@@ -1201,68 +1472,115 @@
         const cacheKey = `${targetBasePath}::${targetFallbackYear}`;
 
         if (cachedDiaryEntries && cachedDiaryPath === cacheKey) {
+            statsMissingPages = 0; // only complete diaries are cached
             return cachedDiaryEntries;
         }
 
-        let firstPageEntries = [];
-        let totalPages = 1;
-        let pageUrl = (n) => `${targetBasePath}page/${n}/`;
+        const { items, failedPages } = await fetchAllPages(
+            targetBasePath,
+            (doc) => extractDiaryEntriesFromDoc(doc, targetFallbackYear),
+            onProgress
+        );
 
-        // Page 1 is always fetched rather than read from the live page: the server HTML is the same
-        // for every viewer, while the live DOM may already be reworked by Letterboxd's scripts
-        // (e.g. owner-only rating widgets replacing the static stars)
-        try {
-            const pageDoc = await fetchDocument(targetBasePath);
-            firstPageEntries = extractDiaryEntriesFromDoc(pageDoc, targetFallbackYear);
-            totalPages = detectTotalPages(pageDoc);
-            pageUrl = pageUrlFor(pageDoc, targetBasePath);
-        } catch (err) {
-            // Network error fallback
+        // An incomplete diary isn't cached, so reopening the stats fetches it again
+        statsMissingPages = failedPages;
+        if (failedPages === 0) {
+            cachedDiaryEntries = items;
+            cachedDiaryPath = cacheKey;
+        }
+        return items;
+    }
+
+    /**
+     * Watched films grid (/member/films/ and its filters: /films/genre/horror/, /films/decade/1990s/...)
+     * Examples:
+     * - /antrubtor/films/
+     * - /antrubtor/films/genre/horror/page/2/
+     * - /antrubtor/films/by/rating/
+     * (/films/diary/ is the diary, /films/reviews/ is a review list)
+     */
+    function getFilmsContext() {
+        const match = window.location.pathname.match(/^\/([^\/]+)\/films(\/.*)?$/i);
+        if (!match) return null;
+
+        let subpath = (match[2] || '/').replace(/\/page\/\d+\/?/i, '/');
+        if (/^\/(?:diary|reviews)(?:\/|$)/i.test(subpath)) return null;
+        if (!subpath.endsWith('/')) subpath += '/';
+
+        return {
+            username: match[1],
+            baseUrl: `/${match[1]}/films${subpath}`,
+            filter: subpath.replace(/^\/|\/$/g, '').replace(/\//g, ' / ') // e.g. "genre / horror"
+        };
+    }
+
+    function isFilmsPage() {
+        return getFilmsContext() !== null;
+    }
+
+    async function fetchWatchedFilms(baseUrl, onProgress) {
+        if (cachedFilms && cachedFilmsPath === baseUrl) {
+            statsMissingPages = 0;
+            return cachedFilms;
         }
 
-        let allEntries = [...firstPageEntries];
+        const { items, failedPages } = await fetchAllPages(baseUrl, extractMemberFilmsFromDoc, onProgress);
+        const seen = new Set();
+        const films = items.filter(f => !seen.has(f.slug) && seen.add(f.slug));
 
-        if (totalPages > 1) {
-            onProgress?.(1, totalPages, allEntries.length);
-
-            const remainingPages = [];
-            for (let p = 2; p <= totalPages; p++) {
-                remainingPages.push(p);
-            }
-
-            const BATCH_SIZE = 5;
-            for (let i = 0; i < remainingPages.length; i += BATCH_SIZE) {
-                const batch = remainingPages.slice(i, i + BATCH_SIZE);
-                const results = await Promise.all(batch.map(async (pageNum) => {
-                    try {
-                        const pageDoc = await fetchDocument(pageUrl(pageNum));
-                        return extractDiaryEntriesFromDoc(pageDoc, targetFallbackYear);
-                    } catch (err) {
-                        return [];
-                    }
-                }));
-
-                results.forEach(pageEntries => {
-                    allEntries = allEntries.concat(pageEntries);
-                });
-
-                const loadedPages = Math.min(i + BATCH_SIZE + 1, totalPages);
-                onProgress?.(loadedPages, totalPages, allEntries.length);
-            }
+        statsMissingPages = failedPages;
+        if (failedPages === 0) {
+            cachedFilms = films;
+            cachedFilmsPath = baseUrl;
         }
+        return films;
+    }
 
-        cachedDiaryEntries = allEntries;
-        cachedDiaryPath = cacheKey;
-        return cachedDiaryEntries;
+    /**
+     * Period helpers. Diary dates are 'YYYY-MM-DD' strings, so they compare as strings.
+     */
+    function parseDateStr(dateStr) {
+        const [y, m, d] = dateStr.split('-').map(Number);
+        return new Date(y, m - 1, d);
+    }
+
+    function toDateStr(date) {
+        return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    }
+
+    function formatDateStr(dateStr, withYear = true) {
+        const d = parseDateStr(dateStr);
+        const monthsEn = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        return `${monthsEn[d.getMonth()]} ${d.getDate()}${withYear ? `, ${d.getFullYear()}` : ''}`;
+    }
+
+    // "Mar 3 – Jun 1, 2025" or "Nov 3, 2024 – Feb 1, 2025"
+    function formatRangeLabel(range) {
+        const sameYear = range.from.slice(0, 4) === range.to.slice(0, 4);
+        if (range.from === range.to) return formatDateStr(range.from);
+        return `${formatDateStr(range.from, !sameYear)} – ${formatDateStr(range.to)}`;
+    }
+
+    /**
+     * Entries of the selected period: 'all', a year, or 'range' (inclusive from / to dates).
+     * The films page has no dates: everything is in the period.
+     */
+    function entriesForSelection(entries, selection = currentSelectedYear, range = currentRange) {
+        if (statsMode === 'films' || selection === 'all') return entries;
+        if (selection === 'range') {
+            return range ? entries.filter(e => e.date >= range.from && e.date <= range.to) : entries;
+        }
+        return entries.filter(e => e.year === selection);
     }
 
     /**
      * Compute activity statistics (Heatmap + Weekdays + Months + Highlights)
-     * Supports both specific year (e.g. 2026) and 'all' (All-Time across all diary years)
+     * `selection` is a year (e.g. 2026), 'all' (All-Time across all diary years) or 'range' (uses `range`)
      */
-    function computeDiaryStats(allEntries, year) {
-        const isAllTime = (year === 'all');
-        const targetEntries = isAllTime ? allEntries : allEntries.filter(e => e.year === year);
+    function computeDiaryStats(allEntries, selection, range) {
+        const kind = selection === 'all' ? 'all' : (selection === 'range' && range ? 'range' : 'year');
+        const isAllTime = (kind === 'all');
+        const targetEntries = entriesForSelection(allEntries, selection, range);
 
         const dateFilmMap = {};
         targetEntries.forEach(e => {
@@ -1309,13 +1627,25 @@
             }
         });
 
-        // Determine years span
-        const years = targetEntries.map(e => e.year).filter(y => y && !isNaN(y));
-        const currentCalYear = new Date().getFullYear();
-        const minYear = isAllTime ? (years.length > 0 ? Math.min(...years) : currentCalYear) : year;
-        const maxYear = isAllTime ? (years.length > 0 ? Math.max(...years) : currentCalYear) : year;
+        // Determine the span: a custom range, one year, or every year with entries
+        let startDate;
+        let endDate;
+        if (kind === 'range') {
+            startDate = parseDateStr(range.from);
+            endDate = parseDateStr(range.to);
+        } else {
+            const years = targetEntries.map(e => e.year).filter(y => y && !isNaN(y));
+            const currentCalYear = new Date().getFullYear();
+            const firstYear = isAllTime ? (years.length > 0 ? Math.min(...years) : currentCalYear) : selection;
+            const lastYear = isAllTime ? (years.length > 0 ? Math.max(...years) : currentCalYear) : selection;
+            startDate = new Date(firstYear, 0, 1);
+            endDate = new Date(lastYear, 11, 31);
+        }
+        const minYear = startDate.getFullYear();
+        const maxYear = endDate.getFullYear();
+        // Dates shown in the stats carry their year when the period spans several years
+        const withYear = isAllTime || minYear !== maxYear;
 
-        const startDate = new Date(minYear, 0, 1);
         const startDayOfWeek = (startDate.getDay() + 6) % 7; // Monday = 0, Sunday = 6
 
         const weeks = [];
@@ -1328,8 +1658,7 @@
         const monthPositions = [];
         let lastLabeledMonthKey = '';
 
-        const curDate = new Date(minYear, 0, 1);
-        const endDate = new Date(maxYear, 11, 31);
+        const curDate = new Date(startDate);
         let totalCalendarDays = 0;
 
         while (curDate <= endDate) {
@@ -1343,11 +1672,15 @@
 
             const monthKey = `${y}-${m}`;
             if (monthKey !== lastLabeledMonthKey) {
-                const label = (isAllTime && m === 0) ? `${y}` : monthShorts[m];
+                // A custom range can start at the end of a month: drop that label if it would overlap the next one
+                const prevLabel = monthPositions[monthPositions.length - 1];
+                if (prevLabel && weeks.length - prevLabel.weekIdx < 3) monthPositions.pop();
+
+                const label = (withYear && m === 0) ? `${y}` : monthShorts[m];
                 monthPositions.push({
                     weekIdx: weeks.length,
                     label,
-                    isYear: (isAllTime && m === 0)
+                    isYear: (withYear && m === 0)
                 });
                 lastLabeledMonthKey = monthKey;
             }
@@ -1439,7 +1772,7 @@
             const monthsEn = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
             if (maxStreak === 1) {
-                if (isAllTime) {
+                if (withYear) {
                     streakRangeStr = `on ${monthsEn[startParts[1] - 1]} ${startParts[2]}, ${startParts[0]}`;
                 } else {
                     streakRangeStr = `on ${monthsEn[startParts[1] - 1]} ${startParts[2]}`;
@@ -1449,7 +1782,7 @@
                 const endMonth = monthsEn[endParts[1] - 1];
 
                 if (startParts[0] === endParts[0]) {
-                    const yearSuffix = isAllTime ? `, ${startParts[0]}` : '';
+                    const yearSuffix = withYear ? `, ${startParts[0]}` : '';
                     if (startParts[1] === endParts[1]) {
                         streakRangeStr = `${startMonth} ${startParts[2]} – ${endParts[2]}${yearSuffix}`;
                     } else {
@@ -1470,7 +1803,45 @@
             }
         });
 
-        // 6. Ratings, rewatches, likes, reviews and release decades
+        return {
+            year: selection,
+            kind,
+            isAllTime,
+            withYear,
+            minYear,
+            maxYear,
+            totalFilms: targetEntries.length,
+            activeDaysCount,
+            activePercentage,
+            maxStreak,
+            streakRangeStr,
+            maxInSingleDay,
+            recordDayStr,
+            recordDayFilms,
+            avgPerWeek,
+            totalWeeks,
+            topMonthName: maxMonthCount > 0 ? monthNames[maxMonthIdx] : '-',
+            topMonthCount: maxMonthCount,
+            weeks,
+            monthPositions,
+            dayStats: dayNames.map((name, i) => ({
+                name,
+                short: dayShorts[i],
+                count: dayCounts[i]
+            })),
+            monthStats: monthNames.map((name, i) => ({
+                name,
+                short: monthShorts[i],
+                count: monthCounts[i]
+            })),
+            ...computeTasteStats(targetEntries)
+        };
+    }
+
+    /**
+     * Ratings, rewatches, likes, reviews and release decades: shared by the diary and the films page
+     */
+    function computeTasteStats(targetEntries) {
         const ratingCounts = new Array(10).fill(0); // index 0 = ½★ ... index 9 = ★★★★★
         let ratingSum = 0;
         let ratedCount = 0;
@@ -1507,33 +1878,6 @@
         const ratingShorts = ['½', '1', '1½', '2', '2½', '3', '3½', '4', '4½', '5'];
 
         return {
-            year,
-            isAllTime,
-            minYear,
-            maxYear,
-            totalFilms: targetEntries.length,
-            activeDaysCount,
-            activePercentage,
-            maxStreak,
-            streakRangeStr,
-            maxInSingleDay,
-            recordDayStr,
-            recordDayFilms,
-            avgPerWeek,
-            topMonthName: maxMonthCount > 0 ? monthNames[maxMonthIdx] : '-',
-            topMonthCount: maxMonthCount,
-            weeks,
-            monthPositions,
-            dayStats: dayNames.map((name, i) => ({
-                name,
-                short: dayShorts[i],
-                count: dayCounts[i]
-            })),
-            monthStats: monthNames.map((name, i) => ({
-                name,
-                short: monthShorts[i],
-                count: monthCounts[i]
-            })),
             avgRating: ratedCount > 0 ? ratingSum / ratedCount / 2 : null,
             ratedCount,
             rewatchCount,
@@ -1548,6 +1892,18 @@
             datedFilmsCount: decadeStats.reduce((sum, d) => sum + d.count, 0),
             topDecadeName: topDecade ? topDecade.name : '-',
             topDecadeCount: topDecade ? topDecade.count : 0
+        };
+    }
+
+    /**
+     * Films page stats: no watch dates, each film once (no rewatches)
+     */
+    function computeFilmsStats(films) {
+        return {
+            kind: 'films',
+            totalFilms: films.length,
+            totalWeeks: null,
+            ...computeTasteStats(films)
         };
     }
 
@@ -1596,10 +1952,11 @@
 
     function injectStatsButton() {
         if (document.getElementById('lbst-stats-btn')) return;
-        if (!isDiaryPage()) return;
+        if (!isDiaryPage() && !isFilmsPage()) return;
 
         const ctx = getDiaryContext();
-        const tooltipText = ctx && ctx.urlYear ? `Statistics ${ctx.urlYear}` : 'Diary Statistics (All Time)';
+        const tooltipText = !ctx ? 'Film Statistics'
+            : ctx.urlYear ? `Statistics ${ctx.urlYear}` : 'Diary Statistics (All Time)';
 
         const btn = document.createElement('button');
         btn.id = 'lbst-stats-btn';
@@ -1644,7 +2001,12 @@
                         </div>
                     </div>
                     <div class="lbst-header-controls">
-                        <select class="lbst-year-select" id="lbst-year-select" style="display: none;"></select>
+                        <div class="lbst-range-inputs" id="lbst-range-inputs" data-diary-only hidden>
+                            <input type="date" class="lbst-date-input" id="lbst-range-from" aria-label="From">
+                            <span class="lbst-range-sep">→</span>
+                            <input type="date" class="lbst-date-input" id="lbst-range-to" aria-label="To">
+                        </div>
+                        <select class="lbst-year-select" id="lbst-year-select" data-diary-only style="display: none;"></select>
                         <button class="lbrnd-btn-icon" id="lbst-modal-close" title="Close (Esc)">✕</button>
                     </div>
                 </div>
@@ -1662,27 +2024,50 @@
                 <div class="lbst-modal-body" id="lbst-content-view" style="display: none;">
                     <!-- Key metrics summary -->
                     <div class="lbst-metrics-grid">
+                        <div class="lbst-metric-card lbst-watchtime-card" id="lbst-watchtime-card">
+                            <div class="lbst-watchtime-main">
+                                <span class="lbst-metric-label">
+                                    Watch Time
+                                    <span class="lbst-watchtime-status" id="lbst-watchtime-status"></span>
+                                </span>
+                                <span class="lbst-metric-value lbst-watchtime-value" id="lbst-metric-watchtime">0m</span>
+                                <span class="lbst-metric-sub" id="lbst-metric-watchtime-days">-</span>
+                            </div>
+                            <div class="lbst-watchtime-details">
+                                <div class="lbst-watchtime-detail">
+                                    <span class="lbst-watchtime-detail-value" id="lbst-watchtime-avg">-</span>
+                                    <span class="lbst-watchtime-detail-label">avg per film</span>
+                                </div>
+                                <div class="lbst-watchtime-detail" data-diary-only>
+                                    <span class="lbst-watchtime-detail-value" id="lbst-watchtime-week">-</span>
+                                    <span class="lbst-watchtime-detail-label">per week</span>
+                                </div>
+                            </div>
+                            <div class="lbst-watchtime-progress">
+                                <div class="lbst-watchtime-progress-fill" id="lbst-watchtime-progress-fill"></div>
+                            </div>
+                        </div>
                         <div class="lbst-metric-card">
-                            <span class="lbst-metric-label">Films Logged</span>
+                            <span class="lbst-metric-label" id="lbst-metric-total-label">Films Logged</span>
                             <span class="lbst-metric-value" id="lbst-metric-total">0</span>
                             <span class="lbst-metric-sub" id="lbst-metric-avg">0 / week</span>
                         </div>
-                        <div class="lbst-metric-card">
+                        <div class="lbst-metric-card" data-diary-only>
                             <span class="lbst-metric-label">Active Days</span>
                             <span class="lbst-metric-value" id="lbst-metric-active">0</span>
                             <span class="lbst-metric-sub" id="lbst-metric-active-pct">0% of year</span>
                         </div>
-                        <div class="lbst-metric-card">
+                        <div class="lbst-metric-card" data-diary-only>
                             <span class="lbst-metric-label">Longest Streak</span>
                             <span class="lbst-metric-value" id="lbst-metric-streak">0 days</span>
                             <span class="lbst-metric-sub" id="lbst-metric-streak-range">no streak</span>
                         </div>
-                        <div class="lbst-metric-card">
+                        <div class="lbst-metric-card" data-diary-only>
                             <span class="lbst-metric-label">Daily Record</span>
                             <span class="lbst-metric-value" id="lbst-metric-record">0</span>
                             <span class="lbst-metric-sub" id="lbst-metric-record-date">no films</span>
                         </div>
-                        <div class="lbst-metric-card">
+                        <div class="lbst-metric-card" data-diary-only>
                             <span class="lbst-metric-label">Top Month</span>
                             <span class="lbst-metric-value" id="lbst-metric-top-month">-</span>
                             <span class="lbst-metric-sub" id="lbst-metric-top-month-count">0 films</span>
@@ -1692,7 +2077,7 @@
                             <span class="lbst-metric-value" id="lbst-metric-avg-rating">-</span>
                             <span class="lbst-metric-sub" id="lbst-metric-avg-rating-sub">no rated films</span>
                         </div>
-                        <div class="lbst-metric-card">
+                        <div class="lbst-metric-card" data-diary-only>
                             <span class="lbst-metric-label">Rewatches</span>
                             <span class="lbst-metric-value" id="lbst-metric-rewatch">0</span>
                             <span class="lbst-metric-sub" id="lbst-metric-rewatch-pct">0% of films</span>
@@ -1715,7 +2100,7 @@
                     </div>
 
                     <!-- GitHub Heatmap Grid -->
-                    <div class="lbst-section">
+                    <div class="lbst-section" data-diary-only>
                         <div class="lbst-section-header">
                             <h4 class="lbst-section-title">Viewing Activity</h4>
                         </div>
@@ -1760,8 +2145,8 @@
                         <div class="lbst-section-header">
                             <h4 class="lbst-section-title">Viewing Distribution</h4>
                             <div class="lbst-toggle-group" id="lbst-chart-toggles">
-                                <button class="lbst-toggle-btn active" data-chart-mode="days">Days</button>
-                                <button class="lbst-toggle-btn" data-chart-mode="months">Months</button>
+                                <button class="lbst-toggle-btn active" data-chart-mode="days" data-diary-only>Days</button>
+                                <button class="lbst-toggle-btn" data-chart-mode="months" data-diary-only>Months</button>
                                 <button class="lbst-toggle-btn" data-chart-mode="ratings">Ratings</button>
                                 <button class="lbst-toggle-btn" data-chart-mode="decades">Decades</button>
                             </div>
@@ -1772,7 +2157,7 @@
                     </div>
 
                     <!-- On This Day: same date in previous years -->
-                    <div class="lbst-section">
+                    <div class="lbst-section" data-diary-only>
                         <div class="lbst-section-header">
                             <h4 class="lbst-section-title" id="lbst-onthisday-title">On This Day</h4>
                         </div>
@@ -1805,18 +2190,38 @@
         overlay.querySelectorAll('#lbst-chart-toggles .lbst-toggle-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 if (currentChartMode === btn.dataset.chartMode) return;
-                currentChartMode = btn.dataset.chartMode;
-                overlay.querySelectorAll('#lbst-chart-toggles .lbst-toggle-btn').forEach(b => {
-                    b.classList.toggle('active', b === btn);
-                });
+                setChartMode(btn.dataset.chartMode);
                 if (currentStatsData) renderBarChart(currentStatsData);
             });
         });
 
         document.getElementById('lbst-year-select').addEventListener('change', (e) => {
-            currentSelectedYear = e.target.value === 'all' ? 'all' : parseInt(e.target.value, 10);
+            const value = e.target.value;
+            if (value === 'range') {
+                // Start from the period on screen, then the dates can be adjusted
+                currentRange = defaultRangeFor(currentSelectedYear);
+            }
+            currentSelectedYear = value === 'all' || value === 'range' ? value : parseInt(value, 10);
             updateStatsForSelectedYear();
         });
+
+        const fromInput = document.getElementById('lbst-range-from');
+        const toInput = document.getElementById('lbst-range-to');
+        const onRangeInput = (edited) => {
+            if (!fromInput.value || !toInput.value) return; // half-typed date
+            let from = fromInput.value;
+            let to = toInput.value;
+            // Moving one end past the other drags the other end along
+            if (from > to) {
+                if (edited === 'from') to = from;
+                else from = to;
+            }
+            if (currentRange && currentRange.from === from && currentRange.to === to) return;
+            currentRange = { from, to };
+            updateStatsForSelectedYear();
+        };
+        fromInput.addEventListener('change', () => onRangeInput('from'));
+        toInput.addEventListener('change', () => onRangeInput('to'));
 
         window.addEventListener('keydown', (e) => {
             if (e.key === 'Escape' && overlay.classList.contains('active')) {
@@ -1831,14 +2236,27 @@
         const overlay = document.getElementById('lbst-modal-overlay');
         overlay.classList.add('active');
 
-        const ctx = getDiaryContext();
-        if (!ctx) return;
+        const diaryCtx = getDiaryContext();
+        const filmsCtx = diaryCtx ? null : getFilmsContext();
+        if (!diaryCtx && !filmsCtx) return;
 
-        const titleText = ctx.urlYear ? `Diary Statistics • ${ctx.urlYear}` : 'Diary Statistics • All Time';
-        document.getElementById('lbst-header-title').textContent = titleText;
-        document.getElementById('lbst-header-sub').textContent = `@${ctx.username} • Loading diary entries...`;
+        statsMode = diaryCtx ? 'diary' : 'films';
+        overlay.classList.toggle('is-films-mode', statsMode === 'films');
 
-        loadAndRenderStats(ctx);
+        const titleEl = document.getElementById('lbst-header-title');
+        const subEl = document.getElementById('lbst-header-sub');
+        loadRuntimeStore(); // read the stored runtimes while the pages load
+
+        if (statsMode === 'films') {
+            titleEl.textContent = 'Film Statistics';
+            subEl.textContent = `@${filmsCtx.username} • Loading watched films...`;
+            loadAndRenderFilmStats(filmsCtx);
+            return;
+        }
+
+        titleEl.textContent = diaryCtx.urlYear ? `Diary Statistics • ${diaryCtx.urlYear}` : 'Diary Statistics • All Time';
+        subEl.textContent = `@${diaryCtx.username} • Loading diary entries...`;
+        loadAndRenderStats(diaryCtx);
     }
 
     function closeStatsModal() {
@@ -1847,143 +2265,191 @@
         unpinTooltip();
     }
 
+    function showStatsLoading(percent, text) {
+        document.getElementById('lbst-loading-state').style.display = 'flex';
+        document.getElementById('lbst-content-view').style.display = 'none';
+        document.getElementById('lbst-progress-fill').style.width = `${percent}%`;
+        document.getElementById('lbst-loading-status').textContent = text;
+    }
+
+    function showStatsContent() {
+        document.getElementById('lbst-loading-state').style.display = 'none';
+        document.getElementById('lbst-content-view').style.display = 'flex';
+    }
+
+    // onProgress callback for fetchAllPages
+    function statsProgress(label) {
+        return (loaded, total, count) => {
+            document.getElementById('lbst-progress-fill').style.width = `${Math.max(10, Math.round((loaded / total) * 100))}%`;
+            document.getElementById('lbst-loading-status').textContent = `${label}... (${count} films • Page ${loaded}/${total})`;
+        };
+    }
+
+    function appendMissingPagesWarning(subEl) {
+        if (statsMissingPages <= 0) return;
+        const warning = document.createElement('span');
+        warning.className = 'lbst-header-warning';
+        warning.textContent = ` • ${statsMissingPages} page${statsMissingPages === 1 ? '' : 's'} couldn't be loaded, reopen to retry`;
+        subEl.appendChild(warning);
+    }
+
+    /**
+     * Year picker: All Time, every year with entries, then a custom date range
+     */
+    function populateYearSelect() {
+        const yearSelect = document.getElementById('lbst-year-select');
+        const years = Array.from(new Set(currentEntries.map(e => e.year).filter(y => y && !isNaN(y))));
+        if (typeof currentSelectedYear === 'number' && !years.includes(currentSelectedYear)) years.push(currentSelectedYear);
+        years.sort((a, b) => b - a);
+
+        yearSelect.innerHTML = '';
+        const addOption = (value, label) => {
+            const opt = document.createElement('option');
+            opt.value = value;
+            opt.textContent = label;
+            opt.selected = value === currentSelectedYear;
+            yearSelect.appendChild(opt);
+        };
+        addOption('all', 'All Time');
+        years.forEach(y => addOption(y, String(y)));
+        addOption('range', 'Custom range…');
+        yearSelect.style.display = 'block';
+    }
+
+    /**
+     * Range shown when "Custom range" is picked: the period that was on screen
+     */
+    function defaultRangeFor(selection) {
+        const today = toDateStr(new Date());
+        if (selection === 'range' && currentRange) return currentRange;
+        if (typeof selection === 'number') {
+            const yearEnd = `${selection}-12-31`;
+            const from = `${selection}-01-01`;
+            const to = yearEnd < today && yearEnd >= from ? yearEnd : (today >= from ? today : yearEnd);
+            return { from, to };
+        }
+        const dates = currentEntries.map(e => e.date).filter(Boolean).sort();
+        const last = dates[dates.length - 1];
+        return {
+            from: dates[0] || `${new Date().getFullYear()}-01-01`,
+            to: last && last > today ? last : today
+        };
+    }
+
     async function loadAndRenderStats(ctx) {
         if (isFetchingDiary) return;
-
-        const loadingView = document.getElementById('lbst-loading-state');
-        const contentView = document.getElementById('lbst-content-view');
-        const statusText = document.getElementById('lbst-loading-status');
-        const progressFill = document.getElementById('lbst-progress-fill');
-
-        loadingView.style.display = 'flex';
-        contentView.style.display = 'none';
-        progressFill.style.width = '10%';
         isFetchingDiary = true;
+        showStatsLoading(10, 'Indexing diary...');
 
+        let entries;
         try {
-            const entries = await fetchEntireDiary(null, undefined, (loaded, total, count) => {
-                const percent = Math.round((loaded / total) * 100);
-                progressFill.style.width = `${Math.max(10, percent)}%`;
-                statusText.textContent = `Indexing diary... (${count} films • Page ${loaded}/${total})`;
-            });
-
-            isFetchingDiary = false;
-            currentEntries = entries;
-
-            // Extract all unique years available in diary
-            const availableYears = Array.from(new Set(entries.map(e => e.year).filter(y => y && !isNaN(y)))).sort((a, b) => b - a);
-
-            // Determine active year:
-            // If on a specific year URL (e.g. /for/2026/), pre-select that year.
-            // If on general /diary/, default to 'all' (All-Time multi-year view).
-            if (ctx.urlYear) {
-                currentSelectedYear = ctx.urlYear;
-            } else {
-                currentSelectedYear = 'all';
-            }
-
-            // Populate Year Selector Dropdown
-            const yearSelect = document.getElementById('lbst-year-select');
-            yearSelect.innerHTML = '';
-
-            // 1. "All Time" option
-            const allOpt = document.createElement('option');
-            allOpt.value = 'all';
-            allOpt.textContent = 'All Time';
-            if (currentSelectedYear === 'all') allOpt.selected = true;
-            yearSelect.appendChild(allOpt);
-
-            // 2. Individual Year options
-            availableYears.forEach(y => {
-                const opt = document.createElement('option');
-                opt.value = y;
-                opt.textContent = y;
-                if (y === currentSelectedYear) opt.selected = true;
-                yearSelect.appendChild(opt);
-            });
-
-            yearSelect.style.display = 'block';
-
-            loadingView.style.display = 'none';
-            contentView.style.display = 'flex';
-
-            updateStatsForSelectedYear();
+            entries = await fetchEntireDiary(null, undefined, statsProgress('Indexing diary'));
         } catch (err) {
             isFetchingDiary = false;
-            statusText.textContent = "Unable to load diary entries. Please try again.";
+            document.getElementById('lbst-loading-status').textContent = 'Unable to load diary entries. Please try again.';
+            return;
         }
+        isFetchingDiary = false;
+        currentEntries = entries;
+
+        // On a year URL (e.g. /for/2026/) that year is pre-selected, on the general /diary/ All Time
+        currentSelectedYear = ctx.urlYear || 'all';
+        populateYearSelect();
+        showStatsContent();
+        updateStatsForSelectedYear();
     }
 
     async function updateStatsForSelectedYear() {
         const ctx = getDiaryContext();
         const username = ctx ? ctx.username : 'user';
         const isAllTime = (currentSelectedYear === 'all');
+        const isRange = (currentSelectedYear === 'range');
 
-        // If 'all' was selected but we originally only fetched a single year page (/for/YYYY/), fetch full diary
+        // All Time and custom ranges need the whole diary: on a /for/YYYY/ page only that year was fetched
         const fullDiaryPath = ctx ? ctx.baseUrl.replace(/for\/.*$/i, '') : '';
-        if (isAllTime && ctx && ctx.urlYear && cachedDiaryPath !== `${fullDiaryPath}::null`) {
-            const loadingView = document.getElementById('lbst-loading-state');
-            const contentView = document.getElementById('lbst-content-view');
-            const statusText = document.getElementById('lbst-loading-status');
-            const progressFill = document.getElementById('lbst-progress-fill');
-
-            loadingView.style.display = 'flex';
-            contentView.style.display = 'none';
-            progressFill.style.width = '20%';
-
+        if ((isAllTime || isRange) && ctx && ctx.urlYear && cachedDiaryPath !== `${fullDiaryPath}::null`) {
+            showStatsLoading(20, 'Indexing full diary...');
             try {
-                const fullEntries = await fetchEntireDiary(fullDiaryPath, null, (loaded, total, count) => {
-                    const percent = Math.round((loaded / total) * 100);
-                    progressFill.style.width = `${Math.max(10, percent)}%`;
-                    statusText.textContent = `Indexing full diary... (${count} films • Page ${loaded}/${total})`;
-                });
-                currentEntries = fullEntries;
-
-                // Update available years dropdown if more years were found in full diary
-                const availableYears = Array.from(new Set(fullEntries.map(e => e.year).filter(y => y && !isNaN(y)))).sort((a, b) => b - a);
-                const yearSelect = document.getElementById('lbst-year-select');
-                yearSelect.innerHTML = '';
-
-                const allOpt = document.createElement('option');
-                allOpt.value = 'all';
-                allOpt.textContent = 'All Time';
-                allOpt.selected = true;
-                yearSelect.appendChild(allOpt);
-
-                availableYears.forEach(y => {
-                    const opt = document.createElement('option');
-                    opt.value = y;
-                    opt.textContent = y;
-                    yearSelect.appendChild(opt);
-                });
-
-                loadingView.style.display = 'none';
-                contentView.style.display = 'flex';
-            } catch (err) {
-                loadingView.style.display = 'none';
-                contentView.style.display = 'flex';
-            }
+                currentEntries = await fetchEntireDiary(fullDiaryPath, null, statsProgress('Indexing full diary'));
+                populateYearSelect(); // the full diary may have more years
+            } catch (err) {}
+            showStatsContent();
         }
 
-        const stats = computeDiaryStats(currentEntries, currentSelectedYear);
+        // Date inputs, bounded by the diary's first entry and today
+        const rangeBox = document.getElementById('lbst-range-inputs');
+        rangeBox.hidden = !isRange;
+        if (isRange) {
+            if (!currentRange) currentRange = defaultRangeFor('all');
+            const fromInput = document.getElementById('lbst-range-from');
+            const toInput = document.getElementById('lbst-range-to');
+            const dates = currentEntries.map(e => e.date).filter(Boolean).sort();
+            const today = toDateStr(new Date());
+            const last = dates[dates.length - 1];
+            fromInput.min = toInput.min = dates[0] || '';
+            fromInput.max = toInput.max = last && last > today ? last : today;
+            fromInput.value = currentRange.from;
+            toInput.value = currentRange.to;
+        }
+
+        const stats = computeDiaryStats(currentEntries, currentSelectedYear, currentRange);
         currentStatsData = stats;
 
         const titleEl = document.getElementById('lbst-header-title');
         const subEl = document.getElementById('lbst-header-sub');
+        const filmsText = `${stats.totalFilms} film${stats.totalFilms === 1 ? '' : 's'} logged`;
 
         if (isAllTime) {
             titleEl.textContent = 'Diary Statistics • All Time';
-            if (stats.minYear && stats.maxYear && stats.minYear !== stats.maxYear) {
-                subEl.textContent = `@${username} • ${stats.totalFilms} film${stats.totalFilms === 1 ? '' : 's'} logged in total (${stats.minYear}–${stats.maxYear})`;
-            } else {
-                subEl.textContent = `@${username} • ${stats.totalFilms} film${stats.totalFilms === 1 ? '' : 's'} logged in total`;
-            }
+            subEl.textContent = stats.minYear !== stats.maxYear
+                ? `@${username} • ${filmsText} in total (${stats.minYear}–${stats.maxYear})`
+                : `@${username} • ${filmsText} in total`;
+        } else if (isRange) {
+            const days = Math.round((parseDateStr(currentRange.to) - parseDateStr(currentRange.from)) / 86400000) + 1;
+            titleEl.textContent = `Diary Statistics • ${formatRangeLabel(currentRange)}`;
+            subEl.textContent = `@${username} • ${filmsText} in ${days.toLocaleString('en-US')} day${days === 1 ? '' : 's'}`;
         } else {
             titleEl.textContent = `Diary Statistics • ${currentSelectedYear}`;
-            subEl.textContent = `@${username} • ${stats.totalFilms} film${stats.totalFilms === 1 ? '' : 's'} logged in ${currentSelectedYear}`;
+            subEl.textContent = `@${username} • ${filmsText} in ${currentSelectedYear}`;
         }
+        appendMissingPagesWarning(subEl);
 
         renderStatsUI(stats);
+        requestRuntimesForCurrentView();
+    }
+
+    /**
+     * Films page (/member/films/): watched films without dates
+     */
+    async function loadAndRenderFilmStats(ctx) {
+        if (isFetchingDiary) return;
+        isFetchingDiary = true;
+        showStatsLoading(10, 'Indexing watched films...');
+
+        let films;
+        try {
+            films = await fetchWatchedFilms(ctx.baseUrl, statsProgress('Indexing watched films'));
+        } catch (err) {
+            isFetchingDiary = false;
+            document.getElementById('lbst-loading-status').textContent = 'Unable to load watched films. Please try again.';
+            return;
+        }
+        isFetchingDiary = false;
+        currentEntries = films;
+        currentSelectedYear = 'all';
+        currentRange = null;
+        showStatsContent();
+
+        const stats = computeFilmsStats(films);
+        currentStatsData = stats;
+
+        const subEl = document.getElementById('lbst-header-sub');
+        document.getElementById('lbst-header-title').textContent = ctx.filter ? `Film Statistics • ${ctx.filter}` : 'Film Statistics';
+        subEl.textContent = `@${ctx.username} • ${stats.totalFilms.toLocaleString('en-US')} film${stats.totalFilms === 1 ? '' : 's'} watched`;
+        appendMissingPagesWarning(subEl);
+
+        renderFilmStatsUI(stats);
+        requestRuntimesForCurrentView();
     }
 
     function escapeHtml(str) {
@@ -2034,35 +2500,9 @@
     }
 
     /**
-     * Render full stats interface (Summary + Heatmap + Bar chart)
+     * Cards shared by the diary and the films page (ratings, rewatches, likes, reviews, decades)
      */
-    function renderStatsUI(stats) {
-        const isAllTime = stats.isAllTime;
-
-        // 1. Summary Metrics
-        document.getElementById('lbst-metric-total').textContent = stats.totalFilms.toLocaleString('en-US');
-        document.getElementById('lbst-metric-avg').textContent = `${stats.avgPerWeek} / week`;
-        document.getElementById('lbst-metric-active').textContent = stats.activeDaysCount;
-        document.getElementById('lbst-metric-active-pct').textContent = `${stats.activePercentage}% ${isAllTime ? 'overall' : 'of year'}`;
-        document.getElementById('lbst-metric-streak').textContent = `${stats.maxStreak} day${stats.maxStreak === 1 ? '' : 's'}`;
-        document.getElementById('lbst-metric-streak-range').textContent = stats.streakRangeStr;
-        document.getElementById('lbst-metric-record').textContent = stats.maxInSingleDay;
-
-        if (stats.recordDayStr) {
-            const parts = stats.recordDayStr.split('-').map(Number);
-            const monthsEn = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-            if (isAllTime) {
-                document.getElementById('lbst-metric-record-date').textContent = `on ${monthsEn[parts[1] - 1]} ${parts[2]}, ${parts[0]}`;
-            } else {
-                document.getElementById('lbst-metric-record-date').textContent = `on ${monthsEn[parts[1] - 1]} ${parts[2]}`;
-            }
-        } else {
-            document.getElementById('lbst-metric-record-date').textContent = 'no films';
-        }
-
-        document.getElementById('lbst-metric-top-month').textContent = stats.topMonthName;
-        document.getElementById('lbst-metric-top-month-count').textContent = `${stats.topMonthCount} film${stats.topMonthCount === 1 ? '' : 's'}${isAllTime ? ' (all-time)' : ''}`;
-
+    function fillTasteMetrics(stats) {
         const pctOfFilms = (n) => `${stats.totalFilms ? Math.round((n / stats.totalFilms) * 100) : 0}% of films`;
         document.getElementById('lbst-metric-avg-rating').textContent = stats.avgRating !== null ? `★ ${stats.avgRating.toFixed(2)}` : '-';
         document.getElementById('lbst-metric-avg-rating-sub').textContent = stats.ratedCount > 0
@@ -2076,6 +2516,55 @@
         document.getElementById('lbst-metric-reviews-pct').textContent = pctOfFilms(stats.reviewCount);
         document.getElementById('lbst-metric-top-decade').textContent = stats.topDecadeName;
         document.getElementById('lbst-metric-top-decade-count').textContent = `${stats.topDecadeCount} film${stats.topDecadeCount === 1 ? '' : 's'}`;
+    }
+
+    function setChartMode(mode) {
+        currentChartMode = mode;
+        document.querySelectorAll('#lbst-chart-toggles .lbst-toggle-btn').forEach(b => {
+            b.classList.toggle('active', b.dataset.chartMode === mode);
+        });
+    }
+
+    /**
+     * Films page: watch time, the shared cards and the Ratings / Decades chart (no dates, so no heatmap)
+     */
+    function renderFilmStatsUI(stats) {
+        document.getElementById('lbst-metric-total-label').textContent = 'Films Watched';
+        document.getElementById('lbst-metric-total').textContent = stats.totalFilms.toLocaleString('en-US');
+        document.getElementById('lbst-metric-avg').textContent = 'each film counted once';
+        fillTasteMetrics(stats);
+        renderWatchTime({ fromZero: true });
+
+        unpinTooltip();
+        if (currentChartMode === 'days' || currentChartMode === 'months') setChartMode('ratings');
+        renderBarChart(stats);
+    }
+
+    /**
+     * Render full stats interface (Summary + Heatmap + Bar chart)
+     */
+    function renderStatsUI(stats) {
+        const isAllTime = stats.isAllTime;
+        const spanLabel = { all: 'overall', range: 'of period', year: 'of year' }[stats.kind];
+
+        // 1. Summary Metrics
+        document.getElementById('lbst-metric-total-label').textContent = 'Films Logged';
+        document.getElementById('lbst-metric-total').textContent = stats.totalFilms.toLocaleString('en-US');
+        document.getElementById('lbst-metric-avg').textContent = `${stats.avgPerWeek} / week`;
+        document.getElementById('lbst-metric-active').textContent = stats.activeDaysCount;
+        document.getElementById('lbst-metric-active-pct').textContent = `${stats.activePercentage}% ${spanLabel}`;
+        document.getElementById('lbst-metric-streak').textContent = `${stats.maxStreak} day${stats.maxStreak === 1 ? '' : 's'}`;
+        document.getElementById('lbst-metric-streak-range').textContent = stats.streakRangeStr;
+        document.getElementById('lbst-metric-record').textContent = stats.maxInSingleDay;
+        document.getElementById('lbst-metric-record-date').textContent = stats.recordDayStr
+            ? `on ${formatDateStr(stats.recordDayStr, stats.withYear)}`
+            : 'no films';
+
+        document.getElementById('lbst-metric-top-month').textContent = stats.topMonthName;
+        document.getElementById('lbst-metric-top-month-count').textContent = `${stats.topMonthCount} film${stats.topMonthCount === 1 ? '' : 's'}${isAllTime ? ' (all-time)' : ''}`;
+
+        fillTasteMetrics(stats);
+        renderWatchTime({ fromZero: true });
 
         // 2. Heatmap Months Row
         const monthsRow = document.getElementById('lbst-months-row');
@@ -2167,10 +2656,10 @@
             weeksTrack.appendChild(col);
         });
 
-        // 4. Auto-scroll heatmap to the right if All-Time so latest weeks are visible first
+        // 4. Auto-scroll heatmap to the right on multi-year spans so the latest weeks are visible first
         const heatmapCard = document.querySelector('.lbst-heatmap-card');
         if (heatmapCard) {
-            if (isAllTime) {
+            if (stats.withYear) {
                 requestAnimationFrame(() => {
                     heatmapCard.scrollLeft = heatmapCard.scrollWidth;
                 });
@@ -2184,6 +2673,121 @@
 
         // 6. On This Day
         renderOnThisDay();
+    }
+
+    /**
+     * Watch Time card: counts up as runtimes arrive, for the period selected in the year picker
+     */
+    let displayedWatchMinutes = 0;
+    let watchTimeTweenFrame = null;
+    let watchTimeRenderTimer = null;
+    let watchTimeWasLoading = false;
+
+    function formatDuration(minutes) {
+        const total = Math.round(minutes);
+        const h = Math.floor(total / 60);
+        const m = total % 60;
+        if (h === 0) return `${m}m`;
+        return `${h.toLocaleString('en-US')}h ${String(m).padStart(2, '0')}m`;
+    }
+
+    function formatWatchDays(minutes) {
+        const days = minutes / 1440;
+        const shown = days >= 10 ? Math.round(days).toLocaleString('en-US') : days.toFixed(1);
+        return `≈ ${shown} days nonstop`;
+    }
+
+    // Runtimes arrive one by one: repaint at most every 250 ms
+    function scheduleWatchTimeRender() {
+        if (watchTimeRenderTimer) return;
+        watchTimeRenderTimer = setTimeout(() => {
+            watchTimeRenderTimer = null;
+            renderWatchTime();
+        }, 250);
+    }
+
+    function replayClass(el, cls) {
+        el.classList.remove(cls);
+        void el.offsetWidth; // restart the CSS animation
+        el.classList.add(cls);
+    }
+
+    function tweenWatchTime(from, to, duration, describe) {
+        const valueEl = document.getElementById('lbst-metric-watchtime');
+        const daysEl = document.getElementById('lbst-metric-watchtime-days');
+        if (watchTimeTweenFrame) cancelAnimationFrame(watchTimeTweenFrame);
+        watchTimeTweenFrame = null;
+
+        const draw = (minutes) => {
+            displayedWatchMinutes = minutes;
+            valueEl.textContent = formatDuration(minutes);
+            daysEl.textContent = describe(minutes);
+        };
+
+        const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        if (from === to || reduceMotion) {
+            draw(to);
+            return;
+        }
+
+        const start = performance.now();
+        const step = (now) => {
+            const t = Math.min(1, (now - start) / duration);
+            const eased = 1 - Math.pow(1 - t, 3); // easeOutCubic
+            draw(from + (to - from) * eased);
+            watchTimeTweenFrame = t < 1 ? requestAnimationFrame(step) : null;
+        };
+        watchTimeTweenFrame = requestAnimationFrame(step);
+    }
+
+    function renderWatchTime(options = {}) {
+        const card = document.getElementById('lbst-watchtime-card');
+        if (!card || !currentStatsData) return;
+
+        const stats = currentStatsData;
+        const wt = computeWatchTime(entriesForSelection(currentEntries));
+        const loading = wt.pendingFilms > 0;
+        const doneFilms = wt.totalFilms - wt.pendingFilms;
+        const fmt = (n) => n.toLocaleString('en-US');
+
+        const statusEl = document.getElementById('lbst-watchtime-status');
+        if (loading) {
+            statusEl.textContent = `Fetching runtimes · ${fmt(doneFilms)} / ${fmt(wt.totalFilms)} films`;
+        } else if (wt.untimedEntries > 0) {
+            statusEl.textContent = `· ${fmt(wt.untimedEntries)} without runtime`;
+        } else {
+            statusEl.textContent = '';
+        }
+        const untimedNoun = statsMode === 'films'
+            ? `film${wt.untimedEntries === 1 ? ' has' : 's have'}`
+            : `diary entr${wt.untimedEntries === 1 ? 'y has' : 'ies have'}`;
+        statusEl.title = wt.untimedEntries > 0
+            ? `${fmt(wt.untimedEntries)} ${untimedNoun} no runtime on Letterboxd and ${wt.untimedEntries === 1 ? 'is' : 'are'} not counted`
+            : '';
+
+        document.getElementById('lbst-watchtime-progress-fill').style.width =
+            `${wt.totalFilms ? Math.round((doneFilms / wt.totalFilms) * 100) : 100}%`;
+        if (loading) card.classList.remove('is-complete');
+        card.classList.toggle('is-loading', loading);
+
+        document.getElementById('lbst-watchtime-avg').textContent =
+            wt.timedEntries > 0 ? formatDuration(wt.minutes / wt.timedEntries) : '-';
+        document.getElementById('lbst-watchtime-week').textContent =
+            wt.minutes > 0 && stats.totalWeeks ? formatDuration(wt.minutes / stats.totalWeeks) : '-';
+
+        const describe = (minutes) => {
+            if (!stats.totalFilms) return statsMode === 'films' ? 'no films' : 'no films logged';
+            if (minutes < 1) return loading ? 'counting...' : 'no runtime found';
+            return formatWatchDays(minutes);
+        };
+        const from = options.fromZero ? 0 : displayedWatchMinutes;
+        tweenWatchTime(from, wt.minutes, options.fromZero ? 900 : 650, describe);
+
+        // One "settle" flash when the count completes (not when everything was already cached)
+        if (watchTimeWasLoading && !loading && !options.fromZero) {
+            replayClass(card, 'is-complete');
+        }
+        watchTimeWasLoading = loading && runtimeStoreLoaded;
     }
 
     /**
@@ -2861,13 +3465,19 @@
             const slug = poster.getAttribute('data-item-slug') || poster.getAttribute('data-film-slug');
             const fullName = poster.getAttribute('data-item-name') || poster.getAttribute('data-film-name') || slug;
             const ratingMatch = li.querySelector('.poster-viewingdata .rating')?.className.match(/rated-(\d+)/);
+            const name = fullName.replace(/\s*\(\d{4}\)\s*$/, '');
+            const year = (fullName.match(/\((\d{4})\)\s*$/) || [])[1] || '';
 
             films.push({
                 slug,
-                name: fullName.replace(/\s*\(\d{4}\)\s*$/, ''),
-                year: (fullName.match(/\((\d{4})\)\s*$/) || [])[1] || '',
+                name,
+                title: name, // same shape as diary entries for the shared stats
+                year,
+                releaseYear: year ? parseInt(year, 10) : null,
                 link: `https://letterboxd.com${poster.getAttribute('data-item-link') || `/film/${slug}/`}`,
-                rating: ratingMatch ? parseInt(ratingMatch[1], 10) : null
+                rating: ratingMatch ? parseInt(ratingMatch[1], 10) : null,
+                liked: !!li.querySelector('.poster-viewingdata .icon-liked'),
+                review: !!li.querySelector('.poster-viewingdata .icon-review')
             });
         });
         return films;
@@ -3194,7 +3804,7 @@
 
     const PAGE_FEATURES = [
         { key: 'picker', matches: isPickablePage, inject: injectFloatingButton, remove: removeWatchlistButton },
-        { key: 'stats', matches: isDiaryPage, inject: injectStatsButton, remove: removeStatsButton },
+        { key: 'stats', matches: () => isDiaryPage() || isFilmsPage(), inject: injectStatsButton, remove: removeStatsButton },
         { key: 'follow', matches: isFollowPage, inject: injectFollowButton, remove: removeFollowButton },
         { key: 'compat', matches: isCompatPage, inject: injectCompatButton, remove: removeCompatButton }
     ];
