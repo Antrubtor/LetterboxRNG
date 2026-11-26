@@ -3935,18 +3935,767 @@
     }
 
     /* ==========================================================================
+       Recommendations (your own profile)
+       1. Favourites: the top 10% of your rated films (likes break ties).
+       2. Each favourite gives its tags (genres, themes, director, cast, countries, studios,
+          languages, decade) and Letterboxd's "similar films", which are the candidates.
+       3. Your taste profile is a TF-IDF vector of the favourites' tags. Each candidate is scored on
+          how many favourites list it as similar, its cosine similarity with the profile, and its
+          Letterboxd rating. Films you've watched or have in your watchlist are left out.
+       ========================================================================== */
+
+    const RECS_STORAGE_KEY = 'lbc_recs'; // last results: { user, at, seedCount, ratedCount, items }
+    const RECS_TTL_MS = 24 * 3600000;
+    const FILM_META_KEY = 'lbc_film_meta'; // slug -> { f: { 'type:id': label }, r, n, y, at }
+    const SIMILAR_KEY = 'lbc_similar'; // slug -> { l: [[slug, name, year, filmId, cacheKey]], at }
+    const RECS_SEED_SHARE = 0.1;
+    const RECS_MIN_SEEDS = 8;
+    const RECS_MAX_SEEDS = 50; // 2 requests per favourite: keeps the first run under a minute
+    const RECS_CANDIDATES = 60; // candidates whose tags are fetched for the final score
+    const RECS_PAGE_SIZE = 24;
+    const RECS_MAX_RESULTS = 48;
+    const RECS_CONCURRENCY = 3; // Letterboxd's Cloudflare challenges bursts of requests
+    const FEATURE_WEIGHTS = { genre: 1, theme: 1.6, mini: 1.3, director: 2.2, cast: 0.7, country: 0.4, language: 0.5, studio: 0.5, decade: 0.4 };
+    const FEATURE_PATTERNS = [
+        ['genre', /^\/films\/genre\/([^\/]+)\/?$/],
+        ['theme', /^\/films\/theme\/([^\/]+)\//],
+        ['mini', /^\/films\/mini-theme\/([^\/]+)\//],
+        ['director', /^\/director\/([^\/]+)\/?$/],
+        ['cast', /^\/actor\/([^\/]+)\/?$/],
+        ['country', /^\/films\/country\/([^\/]+)\/?$/],
+        ['language', /^\/films\/language\/([^\/]+)\/?$/],
+        ['studio', /^\/studio\/([^\/]+)\/?$/]
+    ];
+    const FEATURE_CAPS = { cast: 8, studio: 3, language: 2, country: 3 };
+
+    let isComputingRecs = false;
+    let recsShown = RECS_PAGE_SIZE;
+    let currentRecs = null;
+
+    /**
+     * Slug-keyed cache kept in extension storage, with an age limit and a size cap
+     */
+    function createPersistentCache(key, ttlMs, maxEntries) {
+        let data = {};
+        let loading = null;
+        let timer = null;
+        return {
+            load() {
+                if (!loading) {
+                    loading = storageGet(key).then((stored) => {
+                        data = stored && typeof stored === 'object' ? stored : {};
+                    });
+                }
+                return loading;
+            },
+            get(id) {
+                const entry = data[id];
+                return entry && Date.now() - entry.at < ttlMs ? entry : null;
+            },
+            set(id, value) {
+                data[id] = { ...value, at: Date.now() };
+                if (timer) return;
+                timer = setTimeout(() => {
+                    timer = null;
+                    const ids = Object.keys(data);
+                    if (ids.length > maxEntries) {
+                        ids.sort((a, b) => data[a].at - data[b].at)
+                            .slice(0, ids.length - maxEntries)
+                            .forEach(id => delete data[id]);
+                    }
+                    storageSet(key, data);
+                }, 1500);
+            }
+        };
+    }
+
+    const filmMetaCache = createPersistentCache(FILM_META_KEY, 30 * 86400000, 1500);
+    const similarCache = createPersistentCache(SIMILAR_KEY, 14 * 86400000, 300);
+
+    // Runs fn over items with at most `limit` running at once; a failing item gives null
+    async function mapWithConcurrency(items, limit, fn, onProgress) {
+        const results = new Array(items.length).fill(null);
+        let next = 0;
+        let done = 0;
+        const worker = async () => {
+            while (next < items.length) {
+                const i = next++;
+                try {
+                    results[i] = await fn(items[i], i);
+                } catch (e) {
+                    results[i] = null;
+                }
+                done++;
+                onProgress?.(done, items.length);
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+        return results;
+    }
+
+    /**
+     * Tags, rating and year from a film page
+     */
+    function extractFilmMeta(doc) {
+        const f = {};
+        const used = {};
+        doc.querySelectorAll('a[href]').forEach(a => {
+            const href = a.getAttribute('href');
+            for (const [type, re] of FEATURE_PATTERNS) {
+                const m = href.match(re);
+                if (!m) continue;
+                const key = `${type}:${m[1]}`;
+                if (f[key] !== undefined) break;
+                if (FEATURE_CAPS[type]) {
+                    used[type] = (used[type] || 0) + 1;
+                    if (used[type] > FEATURE_CAPS[type]) break;
+                }
+                f[key] = (a.textContent || m[1]).replace(/\s+/g, ' ').trim() || m[1];
+                break;
+            }
+        });
+
+        let r = null;
+        let n = 0;
+        let p = '';
+        const ld = doc.querySelector('script[type="application/ld+json"]');
+        if (ld) {
+            try {
+                const data = JSON.parse(ld.textContent.replace(/\/\*[\s\S]*?\*\//g, ''));
+                const rating = data.aggregateRating || {};
+                r = rating.ratingValue ? Number(rating.ratingValue) : null;
+                n = rating.ratingCount ? Number(rating.ratingCount) : 0;
+                // The real poster (custom / TMDb posters included), asked in thumbnail size
+                if (typeof data.image === 'string' && data.image.startsWith('https://')) {
+                    p = data.image.replace(/-0-\d+-0-\d+-crop/, '-0-230-0-345-crop');
+                }
+            } catch (e) {}
+        }
+        const yearMatch = (doc.querySelector('meta[property="og:title"]')?.getAttribute('content') || '').match(/\((\d{4})\)\s*$/);
+        const y = yearMatch ? parseInt(yearMatch[1], 10) : null;
+        if (y) {
+            const decade = Math.floor(y / 10) * 10;
+            f[`decade:${decade}`] = `${decade}s`;
+        }
+        return { f, r, n, y, p };
+    }
+
+    async function fetchFilmMeta(slug) {
+        const cached = filmMetaCache.get(slug);
+        if (cached) return cached;
+        const meta = extractFilmMeta(await fetchDocument(`/film/${slug}/`));
+        filmMetaCache.set(slug, meta);
+        return meta;
+    }
+
+    // Letterboxd's "similar films" for a film, most similar first (the film itself left out)
+    async function fetchSimilarFilms(slug) {
+        const cached = similarCache.get(slug);
+        if (cached) return cached.l;
+        const doc = await fetchDocument(`/film/${slug}/similar/`);
+        const list = extractMoviesFromDoc(doc)
+            .map(m => [m.slug.replace(/^\/film\//, '').replace(/\/$/, ''), m.name, m.year || '', m.filmId || '', m.cacheKey || ''])
+            .filter(item => item[0] && item[0] !== slug);
+        similarCache.set(slug, { l: list });
+        return list;
+    }
+
+    /**
+     * The recommendation pipeline. onProgress(step, done, total) drives the loading view.
+     */
+    async function computeRecommendations(username, onProgress) {
+        await Promise.all([filmMetaCache.load(), similarCache.load()]);
+
+        // 1. Watched films (ratings, likes) and watchlist
+        onProgress('films', 0, 1);
+        const [films, watchlist] = await Promise.all([
+            fetchWatchedFilms(`/${username}/films/`, (loaded, total) => onProgress('films', loaded, total)),
+            fetchAllPages(`/${username}/watchlist/`, extractMemberFilmsFromDoc).then(r => r.items).catch(() => [])
+        ]);
+
+        const rated = films.filter(f => f.rating);
+        if (rated.length < 5) {
+            throw Object.assign(new Error('Rate at least 5 films to get recommendations.'), { userFacing: true });
+        }
+
+        // 2. Favourites: highest rated first, liked films first among equals, then most recently added
+        const seedCount = Math.min(rated.length, Math.max(RECS_MIN_SEEDS, Math.min(RECS_MAX_SEEDS, Math.ceil(rated.length * RECS_SEED_SHARE))));
+        const seeds = rated
+            .map((film, order) => ({ film, order }))
+            .sort((a, b) => (b.film.rating - a.film.rating) || ((b.film.liked ? 1 : 0) - (a.film.liked ? 1 : 0)) || (a.order - b.order))
+            .slice(0, seedCount)
+            .map(x => x.film);
+        const lowestSeedRating = Math.min(...seeds.map(s => s.rating));
+        const seedWeight = (s) => 1 + (s.rating - lowestSeedRating) / 2 + (s.liked ? 0.5 : 0);
+
+        const seedTasks = seeds.flatMap(s => [{ kind: 'meta', slug: s.slug }, { kind: 'similar', slug: s.slug }]);
+        const seedResults = await mapWithConcurrency(seedTasks, RECS_CONCURRENCY,
+            (task) => task.kind === 'meta' ? fetchFilmMeta(task.slug) : fetchSimilarFilms(task.slug),
+            (done, total) => onProgress('seeds', done, total));
+        const seedMeta = new Map();
+        const seedSimilar = new Map();
+        seedTasks.forEach((task, i) => {
+            if (!seedResults[i]) return;
+            (task.kind === 'meta' ? seedMeta : seedSimilar).set(task.slug, seedResults[i]);
+        });
+
+        // 3. Candidates: films similar to several favourites, minus watched / watchlist ones
+        const excluded = new Set(films.map(f => f.slug).concat(watchlist.map(f => f.slug)));
+        const candidates = new Map();
+        seeds.forEach(seed => {
+            const w = seedWeight(seed);
+            (seedSimilar.get(seed.slug) || []).forEach(([slug, name, year, filmId, cacheKey], rank) => {
+                if (excluded.has(slug)) return;
+                const contribution = w / (1 + rank / 15);
+                const c = candidates.get(slug) || { slug, name, year, filmId, cacheKey, coScore: 0, sources: [] };
+                c.coScore += contribution;
+                c.sources.push({ title: seed.name, contribution });
+                candidates.set(slug, c);
+            });
+        });
+        if (candidates.size === 0) {
+            throw Object.assign(new Error("Couldn't find similar films for your favourites. Try again in a moment."), { userFacing: true });
+        }
+
+        const shortlist = [...candidates.values()].sort((a, b) => b.coScore - a.coScore).slice(0, RECS_CANDIDATES);
+        const shortlistMeta = await mapWithConcurrency(shortlist, RECS_CONCURRENCY,
+            (c) => fetchFilmMeta(c.slug),
+            (done, total) => onProgress('candidates', done, total));
+
+        // 4. TF-IDF taste profile and cosine similarity
+        onProgress('scoring', 1, 1);
+        const corpus = [...seedMeta.values(), ...shortlistMeta.filter(Boolean)];
+        const docFreq = {};
+        corpus.forEach(meta => Object.keys(meta.f).forEach(k => { docFreq[k] = (docFreq[k] || 0) + 1; }));
+        const featureWeight = (k) => (FEATURE_WEIGHTS[k.split(':')[0]] || 0.5) * (Math.log((corpus.length + 1) / ((docFreq[k] || 0) + 1)) + 1);
+
+        const profile = {};
+        seeds.forEach(seed => {
+            const meta = seedMeta.get(seed.slug);
+            if (!meta) return;
+            const w = seedWeight(seed);
+            Object.keys(meta.f).forEach(k => { profile[k] = (profile[k] || 0) + w; });
+        });
+        Object.keys(profile).forEach(k => { profile[k] *= featureWeight(k); });
+        const profileNorm = Math.sqrt(Object.values(profile).reduce((sum, v) => sum + v * v, 0)) || 1;
+
+        const scored = shortlist.map((c, i) => {
+            const meta = shortlistMeta[i];
+            let cosine = 0;
+            let shared = [];
+            if (meta) {
+                let dot = 0;
+                let norm = 0;
+                Object.keys(meta.f).forEach(k => {
+                    const v = featureWeight(k);
+                    norm += v * v;
+                    if (profile[k]) {
+                        dot += profile[k] * v;
+                        shared.push({ key: k, label: meta.f[k], weight: profile[k] * v });
+                    }
+                });
+                cosine = norm ? dot / (profileNorm * Math.sqrt(norm)) : 0;
+            }
+            // Strongest shared tags, one per kind (a director, a theme, a genre...). Decades,
+            // countries and languages count in the score but say little as a reason.
+            shared.sort((a, b) => b.weight - a.weight);
+            const tags = [];
+            const kinds = new Set();
+            shared.forEach(s => {
+                const kind = s.key.split(':')[0] === 'mini' ? 'theme' : s.key.split(':')[0];
+                if (tags.length < 3 && !kinds.has(kind) && !['decade', 'country', 'language'].includes(kind)) {
+                    kinds.add(kind);
+                    tags.push(s.label);
+                }
+            });
+            const directors = meta ? Object.keys(meta.f).filter(k => k.startsWith('director:')) : [];
+            const quality = meta && meta.r ? Math.max(0, Math.min(1, (meta.r - 3) / 1.5)) * (meta.n >= 1000 ? 1 : 0.5) : 0.3;
+            const because = c.sources.sort((a, b) => b.contribution - a.contribution)
+                .map(s => s.title).filter((t, idx, arr) => arr.indexOf(t) === idx).slice(0, 2);
+            return { ...c, meta, cosine, tags, directors, quality, because, sourceCount: c.sources.length };
+        });
+
+        const maxCo = Math.max(...scored.map(s => s.coScore), 1e-9);
+        const maxCos = Math.max(...scored.map(s => s.cosine), 1e-9);
+        scored.forEach(s => {
+            s.score = 0.45 * (s.coScore / maxCo) + 0.4 * (s.cosine / maxCos) + 0.15 * s.quality;
+        });
+        scored.sort((a, b) => b.score - a.score);
+
+        // At most 2 films per director near the top, the others move down the list
+        const picked = [];
+        const later = [];
+        const perDirector = {};
+        scored.forEach(s => {
+            if (s.directors.some(d => (perDirector[d] || 0) >= 2)) {
+                later.push(s);
+                return;
+            }
+            s.directors.forEach(d => { perDirector[d] = (perDirector[d] || 0) + 1; });
+            picked.push(s);
+        });
+
+        const items = picked.concat(later).slice(0, RECS_MAX_RESULTS).map(s => ({
+            slug: s.slug,
+            name: s.name,
+            year: s.year || (s.meta && s.meta.y) || '',
+            filmId: s.filmId,
+            cacheKey: s.cacheKey,
+            poster: s.meta && s.meta.p ? s.meta.p : '',
+            avg: s.meta && s.meta.r ? s.meta.r : null,
+            match: Math.round(s.score * 100),
+            because: s.because,
+            sourceCount: s.sourceCount,
+            tags: s.tags
+        }));
+
+        return { user: username.toLowerCase(), at: Date.now(), seedCount: seeds.length, ratedCount: rated.length, items };
+    }
+
+    /**
+     * Own profile page: /member/ while logged in as that member
+     */
+    function getRecsContext() {
+        if (!document.body || !document.body.classList.contains('screen-member-profile')) return null;
+        const owner = document.body.getAttribute('data-owner') || (window.location.pathname.match(/^\/([^\/]+)\/?$/) || [])[1];
+        const me = getLoggedInUsername();
+        if (!owner || !me || owner.toLowerCase() !== me) return null;
+        return { username: owner };
+    }
+
+    function isRecsPage() {
+        return getRecsContext() !== null;
+    }
+
+    const SVG_RECS_ICON = `
+        <svg viewBox="0 0 24 24" width="22" height="22" fill="none">
+            <rect x="3" y="3" width="18" height="18" rx="3.5" stroke="#99aabb" stroke-width="1.8" fill="#14181c"/>
+            <path d="M12 6.5l1.55 3.4 3.7.4-2.77 2.5.79 3.65L12 14.6l-3.27 1.85.79-3.65-2.77-2.5 3.7-.4z" fill="#00e054"/>
+        </svg>
+    `;
+
+    function injectRecsButton() {
+        if (document.getElementById('lbrc-recs-btn')) return;
+        if (!isRecsPage()) return;
+
+        const btn = document.createElement('button');
+        btn.id = 'lbrc-recs-btn';
+        btn.setAttribute('aria-label', 'Recommended for you');
+        btn.innerHTML = `
+            ${SVG_RECS_ICON}
+            <div id="lbrc-recs-tooltip">Recommended for you</div>
+        `;
+        btn.addEventListener('click', openRecsModal);
+        document.body.appendChild(btn);
+    }
+
+    function removeRecsButton() {
+        document.getElementById('lbrc-recs-btn')?.remove();
+    }
+
+    function injectRecsModal() {
+        if (document.getElementById('lbrc-modal-overlay')) return;
+
+        const overlay = document.createElement('div');
+        overlay.id = 'lbrc-modal-overlay';
+        overlay.innerHTML = `
+            <div id="lbrc-modal-container">
+                <div class="lbst-modal-header">
+                    <div class="lbst-header-title-box">
+                        <div class="lbrnd-letterboxd-dots">
+                            <span class="lbrnd-dot lbrnd-dot-orange"></span>
+                            <span class="lbrnd-dot lbrnd-dot-green"></span>
+                            <span class="lbrnd-dot lbrnd-dot-cyan"></span>
+                        </div>
+                        <div>
+                            <h3 class="lbst-header-title">Recommended for You</h3>
+                            <p class="lbst-header-subtitle" id="lbrc-header-sub">Loading...</p>
+                        </div>
+                    </div>
+                    <div class="lbst-header-controls">
+                        <button class="lbrc-refresh-btn" id="lbrc-refresh" title="Compute again from your latest ratings" hidden>↻ Refresh</button>
+                        <button class="lbrnd-btn-icon" id="lbrc-modal-close" title="Close (Esc)">✕</button>
+                    </div>
+                </div>
+
+                <div id="lbrc-loading-state">
+                    <div class="lbst-spinner"></div>
+                    <div class="lbst-loading-text" id="lbrc-loading-status">Reading your films...</div>
+                    <div class="lbst-progress-bar-wrap">
+                        <div class="lbst-progress-bar-fill" id="lbrc-progress-fill"></div>
+                    </div>
+                    <div class="lbrc-steps" id="lbrc-steps">
+                        <span data-step="films">Your films</span>
+                        <span data-step="seeds">Your favourites</span>
+                        <span data-step="candidates">Similar films</span>
+                        <span data-step="scoring">Scoring</span>
+                    </div>
+                </div>
+
+                <div class="lbst-modal-body" id="lbrc-content-view" style="display: none;">
+                    <p class="lbrc-explainer" id="lbrc-explainer"></p>
+                    <div class="lbrc-grid" id="lbrc-grid"></div>
+                    <button class="lbrc-more-btn" id="lbrc-more" hidden>Show more</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(overlay);
+
+        document.getElementById('lbrc-modal-close').addEventListener('click', closeRecsModal);
+        document.getElementById('lbrc-refresh').addEventListener('click', () => loadRecommendations(true));
+        document.getElementById('lbrc-more').addEventListener('click', () => {
+            recsShown += RECS_PAGE_SIZE;
+            renderRecommendations();
+        });
+        overlay.addEventListener('click', (e) => {
+            if (e.target === overlay) closeRecsModal();
+        });
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && overlay.classList.contains('active')) closeRecsModal();
+        });
+    }
+
+    function openRecsModal() {
+        injectRecsModal();
+        document.getElementById('lbrc-modal-overlay').classList.add('active');
+        loadRecommendations(false);
+    }
+
+    function closeRecsModal() {
+        document.getElementById('lbrc-modal-overlay')?.classList.remove('active');
+    }
+
+    const RECS_STEPS = ['films', 'seeds', 'candidates', 'scoring'];
+
+    async function loadRecommendations(forceRefresh) {
+        const ctx = getRecsContext();
+        if (!ctx || isComputingRecs) return;
+
+        const loadingView = document.getElementById('lbrc-loading-state');
+        const contentView = document.getElementById('lbrc-content-view');
+        const statusText = document.getElementById('lbrc-loading-status');
+        const progressFill = document.getElementById('lbrc-progress-fill');
+        const subEl = document.getElementById('lbrc-header-sub');
+        const refreshBtn = document.getElementById('lbrc-refresh');
+
+        // Results from the last 24 hours open instantly
+        if (!forceRefresh) {
+            const stored = await storageGet(RECS_STORAGE_KEY);
+            if (stored && stored.user === ctx.username.toLowerCase() && Date.now() - stored.at < RECS_TTL_MS && Array.isArray(stored.items)) {
+                currentRecs = stored;
+                recsShown = RECS_PAGE_SIZE;
+                renderRecommendations();
+                return;
+            }
+        }
+
+        isComputingRecs = true;
+        refreshBtn.hidden = true;
+        loadingView.classList.remove('is-message');
+        loadingView.style.display = 'flex';
+        contentView.style.display = 'none';
+        progressFill.style.width = '4%';
+        subEl.textContent = `@${ctx.username} • Looking at what you love...`;
+
+        const labels = {
+            films: (d, t) => `Reading your films${t > 1 ? ` (page ${d}/${t})` : ''}...`,
+            seeds: (d, t) => `Studying your favourites (${Math.ceil(d / 2)}/${Math.ceil(t / 2)})...`,
+            candidates: (d, t) => `Comparing similar films (${d}/${t})...`,
+            scoring: () => 'Scoring...'
+        };
+        const stepShare = { films: [0, 15], seeds: [15, 70], candidates: [70, 97], scoring: [97, 100] };
+        const onProgress = (step, done, total) => {
+            const [from, to] = stepShare[step];
+            progressFill.style.width = `${Math.max(4, from + (to - from) * (total ? done / total : 0))}%`;
+            statusText.textContent = labels[step](done, total);
+            const reached = RECS_STEPS.indexOf(step);
+            document.querySelectorAll('#lbrc-steps span').forEach((el, i) => {
+                el.classList.toggle('is-done', i < reached);
+                el.classList.toggle('is-active', i === reached);
+            });
+        };
+
+        try {
+            currentRecs = await computeRecommendations(ctx.username, onProgress);
+            await storageSet(RECS_STORAGE_KEY, currentRecs);
+            recsShown = RECS_PAGE_SIZE;
+            renderRecommendations();
+        } catch (err) {
+            loadingView.classList.add('is-message');
+            statusText.textContent = err.userFacing ? err.message : 'Unable to load recommendations. Please try again.';
+            subEl.textContent = `@${ctx.username}`;
+            refreshBtn.hidden = false;
+        } finally {
+            isComputingRecs = false;
+        }
+    }
+
+    function renderRecommendations() {
+        const recs = currentRecs;
+        if (!recs) return;
+        const ctx = getRecsContext();
+
+        document.getElementById('lbrc-loading-state').style.display = 'none';
+        document.getElementById('lbrc-content-view').style.display = 'flex';
+        document.getElementById('lbrc-refresh').hidden = false;
+
+        const ageMin = Math.round((Date.now() - recs.at) / 60000);
+        const age = ageMin < 1 ? 'just now' : ageMin < 60 ? `${ageMin} min ago` : `${Math.round(ageMin / 60)} h ago`;
+        document.getElementById('lbrc-header-sub').textContent =
+            `@${ctx ? ctx.username : recs.user} • ${recs.items.length} films • computed ${age}`;
+        document.getElementById('lbrc-explainer').textContent =
+            `Based on your ${recs.seedCount} favourite films (the top 10% of your ${recs.ratedCount.toLocaleString('en-US')} ratings): films Letterboxd finds similar to them, ranked by how well their genres, themes, directors and cast match your taste. Films you've seen or have in your watchlist are left out.`;
+
+        const grid = document.getElementById('lbrc-grid');
+        grid.innerHTML = '';
+        recs.items.slice(0, recsShown).forEach((item, idx) => grid.appendChild(createRecCard(item, idx)));
+
+        const more = document.getElementById('lbrc-more');
+        more.hidden = recsShown >= recs.items.length;
+    }
+
+    function createRecCard(item, idx) {
+        const card = document.createElement('a');
+        card.className = 'lbrc-card';
+        card.href = `https://letterboxd.com/film/${encodeURIComponent(item.slug)}/`;
+        card.target = '_blank';
+        card.rel = 'noopener';
+        card.style.animationDelay = `${Math.min(idx % RECS_PAGE_SIZE, 12) * 30}ms`;
+
+        const posterBox = document.createElement('div');
+        posterBox.className = 'lbrc-poster';
+        // Poster from the film page, else the CDN path built from the film ID, else Letterboxd's resolver
+        const sources = [item.poster, buildCdnPosterUrl(item.filmId, item.slug, item.cacheKey)].filter(Boolean);
+        const img = document.createElement('img');
+        img.loading = 'lazy';
+        img.alt = '';
+        let triedResolver = false;
+        img.onerror = async () => {
+            if (sources.length) {
+                img.src = sources.shift();
+                return;
+            }
+            if (!triedResolver) {
+                triedResolver = true;
+                const custom = await resolveCustomPosterUrl(item.slug, item.cacheKey);
+                if (custom) {
+                    img.src = custom;
+                    return;
+                }
+            }
+            img.remove();
+        };
+        if (sources.length) {
+            img.src = sources.shift();
+            posterBox.appendChild(img);
+        }
+
+        const info = document.createElement('div');
+        info.className = 'lbrc-info';
+
+        const title = document.createElement('div');
+        title.className = 'lbrc-title';
+        title.textContent = item.name;
+        if (item.year) {
+            const year = document.createElement('span');
+            year.className = 'lbrc-year';
+            year.textContent = ` ${item.year}`;
+            title.appendChild(year);
+        }
+
+        const meta = document.createElement('div');
+        meta.className = 'lbrc-meta';
+        const match = document.createElement('span');
+        match.className = 'lbrc-match';
+        match.textContent = `${item.match}% match`;
+        meta.appendChild(match);
+        if (item.avg) {
+            const avg = document.createElement('span');
+            avg.className = 'lbrc-avg';
+            avg.textContent = `★ ${item.avg.toFixed(1)}`;
+            meta.appendChild(avg);
+        }
+
+        const because = document.createElement('div');
+        because.className = 'lbrc-because';
+        if (item.because && item.because.length) {
+            because.append('Because you loved ');
+            item.because.forEach((t, i) => {
+                if (i > 0) because.append(i === item.because.length - 1 ? ' & ' : ', ');
+                const b = document.createElement('strong');
+                b.textContent = t;
+                because.appendChild(b);
+            });
+            const others = (item.sourceCount || 0) - item.because.length;
+            if (others > 0) because.append(` +${others}`);
+        }
+
+        const tags = document.createElement('div');
+        tags.className = 'lbrc-tags';
+        (item.tags || []).forEach(t => {
+            const chip = document.createElement('span');
+            chip.textContent = t;
+            tags.appendChild(chip);
+        });
+
+        info.append(title, meta, because, tags);
+        card.append(posterBox, info);
+        return card;
+    }
+
+    /* ==========================================================================
+       Update notice: a newer release on GitHub
+       Unpacked (Chrome) extensions can't update themselves, so the notice links to the release.
+       Closing it hides it for 24 hours (a newer version than the one dismissed shows right away).
+       ========================================================================== */
+
+    const RELEASES_API = 'https://api.github.com/repos/Antrubtor/LetterboxCompanion/releases/latest';
+    const RELEASES_PAGE = 'https://github.com/Antrubtor/LetterboxCompanion/releases/latest';
+    const UPDATE_STORAGE_KEY = 'lbc_update'; // { checkedAt, latest, url, dismissedVersion, dismissedUntil }
+    const UPDATE_CHECK_INTERVAL_MS = 6 * 3600000; // GitHub allows 60 unauthenticated calls / hour
+    const UPDATE_SNOOZE_MS = 24 * 3600000;
+
+    function storageGet(key) {
+        return new Promise((resolve) => {
+            if (!extStorage) {
+                try { resolve(JSON.parse(localStorage.getItem(key) || 'null')); } catch (e) { resolve(null); }
+                return;
+            }
+            try {
+                extStorage.get(key, (res) => resolve(res ? res[key] : null));
+            } catch (e) {
+                resolve(null); // extension context invalidated (extension reloaded)
+            }
+        });
+    }
+
+    function storageSet(key, value) {
+        return new Promise((resolve) => {
+            if (!extStorage) {
+                try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
+                resolve();
+                return;
+            }
+            try {
+                extStorage.set({ [key]: value }, () => resolve());
+            } catch (e) {
+                resolve();
+            }
+        });
+    }
+
+    // 1 if a > b, -1 if a < b, 0 if equal ("1.10.0" > "1.9.2")
+    function compareVersions(a, b) {
+        const pa = String(a).split('.').map(n => parseInt(n, 10) || 0);
+        const pb = String(b).split('.').map(n => parseInt(n, 10) || 0);
+        for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+            const diff = (pa[i] || 0) - (pb[i] || 0);
+            if (diff !== 0) return diff > 0 ? 1 : -1;
+        }
+        return 0;
+    }
+
+    function installedVersion() {
+        try {
+            return chrome.runtime.getManifest().version;
+        } catch (e) {
+            return null;
+        }
+    }
+
+    async function checkForUpdate() {
+        const current = installedVersion();
+        if (!current || enabledFeatures.updates === false) return;
+
+        const state = (await storageGet(UPDATE_STORAGE_KEY)) || {};
+        if (!state.checkedAt || Date.now() - state.checkedAt > UPDATE_CHECK_INTERVAL_MS) {
+            state.checkedAt = Date.now(); // even when the call fails, so a GitHub outage isn't hammered
+            try {
+                const res = await fetch(RELEASES_API, { credentials: 'omit', headers: { 'Accept': 'application/vnd.github+json' } });
+                if (res.ok) {
+                    const release = await res.json();
+                    const latest = String(release.tag_name || '').replace(/^v/i, '');
+                    if (/^\d+(\.\d+)*$/.test(latest)) {
+                        state.latest = latest;
+                        const url = String(release.html_url || '');
+                        state.url = url.startsWith('https://github.com/Antrubtor/LetterboxCompanion/') ? url : RELEASES_PAGE;
+                    }
+                }
+            } catch (e) {}
+            const stored = (await storageGet(UPDATE_STORAGE_KEY)) || {};
+            await storageSet(UPDATE_STORAGE_KEY, { ...stored, checkedAt: state.checkedAt, latest: state.latest, url: state.url });
+        }
+
+        if (!state.latest || compareVersions(state.latest, current) <= 0) return;
+        if (state.dismissedVersion === state.latest && Date.now() < (state.dismissedUntil || 0)) return;
+        if (enabledFeatures.updates === false) return;
+        showUpdateToast(state.latest, current, state.url || RELEASES_PAGE);
+    }
+
+    async function snoozeUpdate(version) {
+        const stored = (await storageGet(UPDATE_STORAGE_KEY)) || {};
+        await storageSet(UPDATE_STORAGE_KEY, { ...stored, dismissedVersion: version, dismissedUntil: Date.now() + UPDATE_SNOOZE_MS });
+    }
+
+    function showUpdateToast(latest, current, url) {
+        if (document.getElementById('lbc-update-toast')) return;
+
+        const toast = document.createElement('div');
+        toast.id = 'lbc-update-toast';
+        toast.setAttribute('role', 'status');
+        toast.innerHTML = `
+            <button type="button" class="lbc-update-main">
+                <span class="lbrnd-letterboxd-dots">
+                    <span class="lbrnd-dot lbrnd-dot-orange"></span>
+                    <span class="lbrnd-dot lbrnd-dot-green"></span>
+                    <span class="lbrnd-dot lbrnd-dot-cyan"></span>
+                </span>
+                <span class="lbc-update-text">
+                    <strong></strong>
+                    <span class="lbc-update-sub"></span>
+                </span>
+            </button>
+            <button type="button" class="lbc-update-close" title="Hide for 24 hours" aria-label="Hide for 24 hours">✕</button>
+        `;
+        toast.querySelector('strong').textContent = `Letterboxd Companion ${latest} is out`;
+        toast.querySelector('.lbc-update-sub').textContent = `You have ${current} · Get it on GitHub`;
+
+        const hide = () => {
+            toast.classList.remove('is-visible');
+            setTimeout(() => toast.remove(), 300);
+        };
+        toast.querySelector('.lbc-update-main').addEventListener('click', () => {
+            window.open(url, '_blank', 'noopener');
+            snoozeUpdate(latest);
+            hide();
+        });
+        toast.querySelector('.lbc-update-close').addEventListener('click', () => {
+            snoozeUpdate(latest);
+            hide();
+        });
+
+        document.body.appendChild(toast);
+        requestAnimationFrame(() => requestAnimationFrame(() => toast.classList.add('is-visible')));
+    }
+
+    function removeUpdateToast() {
+        document.getElementById('lbc-update-toast')?.remove();
+    }
+
+    /* ==========================================================================
        Feature switches (popup) & page button switcher
        ========================================================================== */
 
     // Every feature is on unless switched off in the popup
-    const DEFAULT_FEATURES = { picker: true, stats: true, follow: true, compat: true };
+    const DEFAULT_FEATURES = { picker: true, stats: true, follow: true, compat: true, recs: true, updates: true };
     let enabledFeatures = { ...DEFAULT_FEATURES };
 
     const PAGE_FEATURES = [
         { key: 'picker', matches: isPickablePage, inject: injectFloatingButton, remove: removeWatchlistButton },
         { key: 'stats', matches: () => isDiaryPage() || isFilmsPage(), inject: injectStatsButton, remove: removeStatsButton },
         { key: 'follow', matches: isFollowPage, inject: injectFollowButton, remove: removeFollowButton },
-        { key: 'compat', matches: isCompatPage, inject: injectCompatButton, remove: removeCompatButton }
+        { key: 'compat', matches: isCompatPage, inject: injectCompatButton, remove: removeCompatButton },
+        { key: 'recs', matches: isRecsPage, inject: injectRecsButton, remove: removeRecsButton }
     ];
 
     /**
@@ -3960,6 +4709,7 @@
                 feature.remove();
             }
         });
+        if (enabledFeatures.updates === false) removeUpdateToast();
     }
 
     function loadFeatureSettings(callback) {
@@ -3980,7 +4730,21 @@
     }
 
     function init() {
-        loadFeatureSettings(updatePageButtons);
+        // Firefox also runs the script in documents without a <body> (e.g. Cloudflare's check page)
+        if (!document.body) return;
+
+        // The popup's page shortcuts link to the signed-in member's pages
+        const me = getLoggedInUsername();
+        if (me) {
+            storageGet('lbc_username').then((stored) => {
+                if (stored !== me) storageSet('lbc_username', me);
+            });
+        }
+
+        loadFeatureSettings(() => {
+            updatePageButtons();
+            checkForUpdate();
+        });
 
         let lastUrl = window.location.href;
         const observer = new MutationObserver(() => {

@@ -24,75 +24,105 @@
         </header>
 
         <main class="popup-content">
-            <div class="info-card">
-                <p class="info-text">
-                    Pick a random film from any <strong>Watchlist</strong> or <strong>List</strong>, explore your <strong>Diary</strong> stats, see who doesn't follow back on <strong>Following / Followers</strong>, and compare tastes on any member's <strong>Profile</strong>.
-                </p>
-            </div>
+            <a id="update-banner" class="update-banner" href="https://github.com/Antrubtor/LetterboxCompanion/releases/latest" target="_blank" rel="noopener" hidden>
+                <strong id="update-banner-title">New version available</strong>
+                <span>Get it →</span>
+            </a>
+
+            <nav class="settings-group" aria-label="Pages with Letterboxd Companion features">
+                <div class="settings-title">Go to</div>
+                <div class="page-tiles">
+                    <a class="page-tile" data-path="watchlist/" data-feature="picker" target="_blank" rel="noopener">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3" fill="none" stroke="#99aabb" stroke-width="1.8"/><circle cx="9" cy="9" r="1.5" fill="#00e054"/><circle cx="15" cy="15" r="1.5" fill="#40bcf4"/><circle cx="15" cy="9" r="1.5" fill="#ff8000"/><circle cx="9" cy="15" r="1.5" fill="#ffffff"/></svg>
+                        <span class="tile-label">Watchlist</span>
+                        <span class="tile-hint">Random pick</span>
+                    </a>
+                    <a class="page-tile" data-path="lists/" data-feature="picker" target="_blank" rel="noopener">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7h11M9 12h11M9 17h11" stroke="#99aabb" stroke-width="1.8" stroke-linecap="round"/><circle cx="5" cy="7" r="1.4" fill="#ff8000"/><circle cx="5" cy="12" r="1.4" fill="#00e054"/><circle cx="5" cy="17" r="1.4" fill="#40bcf4"/></svg>
+                        <span class="tile-label">Lists</span>
+                        <span class="tile-hint">Random pick</span>
+                    </a>
+                    <a class="page-tile" data-path="diary/" data-feature="stats" target="_blank" rel="noopener">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="5" width="16" height="15" rx="2.5" fill="none" stroke="#99aabb" stroke-width="1.8"/><path d="M4 10h16M9 3v4M15 3v4" stroke="#99aabb" stroke-width="1.8" stroke-linecap="round"/><rect x="8" y="13" width="3" height="3" rx=".8" fill="#00e054"/><rect x="13" y="13" width="3" height="3" rx=".8" fill="#40bcf4"/></svg>
+                        <span class="tile-label">Diary</span>
+                        <span class="tile-hint">Stats</span>
+                    </a>
+                    <a class="page-tile" data-path="films/" data-feature="stats" target="_blank" rel="noopener">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2.5" fill="none" stroke="#99aabb" stroke-width="1.8"/><rect x="7.5" y="12" width="2.5" height="5" rx=".8" fill="#40bcf4"/><rect x="10.8" y="9" width="2.5" height="8" rx=".8" fill="#00e054"/><rect x="14" y="7" width="2.5" height="10" rx=".8" fill="#ff8000"/></svg>
+                        <span class="tile-label">Films</span>
+                        <span class="tile-hint">Watch time</span>
+                    </a>
+                    <a class="page-tile" data-path="" data-feature="recs" target="_blank" rel="noopener">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2.5" fill="none" stroke="#99aabb" stroke-width="1.8"/><path d="M12 7.5l1.4 3 3.3.35-2.45 2.25.7 3.25L12 14.7l-2.95 1.65.7-3.25-2.45-2.25 3.3-.35z" fill="#00e054"/></svg>
+                        <span class="tile-label">Profile</span>
+                        <span class="tile-hint">For you</span>
+                    </a>
+                    <a class="page-tile" data-path="following/" data-feature="follow" target="_blank" rel="noopener">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="9" r="3" fill="none" stroke="#99aabb" stroke-width="1.8"/><path d="M3.5 19c.6-3 2.8-4.5 5.5-4.5s4.9 1.5 5.5 4.5" fill="none" stroke="#99aabb" stroke-width="1.8" stroke-linecap="round"/><circle cx="17" cy="8" r="2.2" fill="#40bcf4"/><path d="M15.5 13.2c2.6-.4 4.6.9 5.2 3.8" fill="none" stroke="#40bcf4" stroke-width="1.8" stroke-linecap="round"/></svg>
+                        <span class="tile-label">Network</span>
+                        <span class="tile-hint">Follow check</span>
+                    </a>
+                </div>
+                <p class="tiles-note" id="tiles-note" hidden>Open Letterboxd while signed in to link these to your own pages.</p>
+            </nav>
 
             <div class="settings-group">
                 <div class="settings-title">Features</div>
                 <div class="setting-item">
-                    <div class="setting-text">
-                        <span class="setting-label">Random picker</span>
-                        <span class="setting-hint">Watchlists &amp; lists</span>
-                    </div>
+                    <span class="setting-label" title="Watchlists &amp; lists">Random picker</span>
                     <label class="switch">
                         <input type="checkbox" class="feature-toggle" data-feature="picker" checked>
                         <span class="slider"></span>
                     </label>
                 </div>
                 <div class="setting-item">
-                    <div class="setting-text">
-                        <span class="setting-label">Statistics</span>
-                        <span class="setting-hint">Diary &amp; watched films, watch time</span>
-                    </div>
+                    <span class="setting-label" title="Diary &amp; watched films, watch time">Statistics</span>
                     <label class="switch">
                         <input type="checkbox" class="feature-toggle" data-feature="stats" checked>
                         <span class="slider"></span>
                     </label>
                 </div>
                 <div class="setting-item">
-                    <div class="setting-text">
-                        <span class="setting-label">Follow check</span>
-                        <span class="setting-hint">Following / Followers pages</span>
-                    </div>
+                    <span class="setting-label" title="Following / Followers pages">Follow check</span>
                     <label class="switch">
                         <input type="checkbox" class="feature-toggle" data-feature="follow" checked>
                         <span class="slider"></span>
                     </label>
                 </div>
                 <div class="setting-item">
-                    <div class="setting-text">
-                        <span class="setting-label">Taste compatibility</span>
-                        <span class="setting-hint">Other members' profiles</span>
-                    </div>
+                    <span class="setting-label" title="Other members' profiles">Taste compatibility</span>
                     <label class="switch">
                         <input type="checkbox" class="feature-toggle" data-feature="compat" checked>
                         <span class="slider"></span>
                     </label>
                 </div>
-            </div>
-
-            <div class="settings-group">
                 <div class="setting-item">
-                    <span class="setting-label">Sound effects</span>
+                    <span class="setting-label" title="Your own profile">Recommendations</span>
+                    <label class="switch">
+                        <input type="checkbox" class="feature-toggle" data-feature="recs" checked>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <div class="setting-item">
+                    <span class="setting-label" title="New releases on GitHub">Update notifications</span>
+                    <label class="switch">
+                        <input type="checkbox" class="feature-toggle" data-feature="updates" checked>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <div class="setting-item">
+                    <span class="setting-label" title="Picker reel">Sound effects</span>
                     <label class="switch">
                         <input type="checkbox" id="toggle-sound" checked>
                         <span class="slider"></span>
                     </label>
                 </div>
             </div>
-
-            <div class="quick-links">
-                <a href="https://letterboxd.com/watchlist/" target="_blank" class="btn-open-watchlist">
-                    Open Watchlist
-                </a>
-            </div>
         </main>
 
         <footer class="popup-footer">
             <span>Chrome • Safari • Firefox • Edge</span>
+            <span id="popup-version"></span>
         </footer>
     </div>
     <script src="popup.js"></script>

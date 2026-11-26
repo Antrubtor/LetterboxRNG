@@ -12,6 +12,11 @@ jobs:
   release:
     name: Package and Release Extension
     runs-on: ubuntu-latest
+    env:
+      # API credentials from https://addons.mozilla.org/developers/addon/api/key/
+      # (repository secrets). Without them the Firefox add-on is not signed.
+      AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+      AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
 
     steps:
       - name: Checkout Code
@@ -19,29 +24,68 @@ jobs:
 
       - name: Extract Tag Version
         id: vars
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        run: |
+          echo "TAG=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Check manifest version
+        run: |
+          MANIFEST_VERSION=$(jq -r .version manifest.json)
+          if [ "$MANIFEST_VERSION" != "${{ steps.vars.outputs.VERSION }}" ]; then
+            echo "::error::manifest.json version ($MANIFEST_VERSION) does not match the tag ${{ steps.vars.outputs.TAG }}"
+            exit 1
+          fi
 
       - name: Package Extension
         run: |
-          mkdir -p build
-          # Pack main standalone zip
-          zip -r "letterboxd-companion-${{ steps.vars.outputs.VERSION }}.zip" \
-            manifest.json content.js content.css popup.html popup.css popup.js icons/
-          
-          # Pack Firefox specific .xpi package
-          cp "letterboxd-companion-${{ steps.vars.outputs.VERSION }}.zip" \
-             "letterboxd-companion-${{ steps.vars.outputs.VERSION }}-firefox.xpi"
+          mkdir -p ext dist
+          cp -r manifest.json content.js content.css popup.html popup.css popup.js icons ext/
+          # Chrome package: a zip archive, named .xpi like the Firefox one
+          (cd ext && zip -r "../dist/letterboxd-companion-${{ steps.vars.outputs.TAG }}-chrome.xpi" .)
+
+      # Firefox only installs add-ons signed by Mozilla. "unlisted" = signed for self-distribution
+      # (not published on addons.mozilla.org); updates come from updates.json below.
+      - name: Sign Firefox add-on
+        if: ${{ env.AMO_JWT_ISSUER != '' && env.AMO_JWT_SECRET != '' }}
+        run: |
+          npx --yes web-ext@10 sign \
+            --source-dir ext \
+            --artifacts-dir signed \
+            --channel unlisted \
+            --api-key "$AMO_JWT_ISSUER" \
+            --api-secret "$AMO_JWT_SECRET" \
+            --approval-timeout 900000
+          XPI="dist/letterboxd-companion-${{ steps.vars.outputs.TAG }}-firefox.xpi"
+          mv signed/*.xpi "$XPI"
+
+          # Firefox checks this file (manifest "update_url") to update the add-on by itself
+          HASH=$(sha256sum "$XPI" | cut -d' ' -f1)
+          ADDON_ID=$(jq -r '.browser_specific_settings.gecko.id' manifest.json)
+          jq -n \
+            --arg id "$ADDON_ID" \
+            --arg version "${{ steps.vars.outputs.VERSION }}" \
+            --arg link "https://github.com/${{ github.repository }}/releases/download/${{ steps.vars.outputs.TAG }}/$(basename "$XPI")" \
+            --arg hash "sha256:$HASH" \
+            '{addons: {($id): {updates: [{version: $version, update_link: $link, update_hash: $hash}]}}}' \
+            > dist/updates.json
+          cat dist/updates.json
+
+      - name: Warn about the unsigned Firefox build
+        if: ${{ env.AMO_JWT_ISSUER == '' || env.AMO_JWT_SECRET == '' }}
+        run: echo "::warning::AMO_JWT_ISSUER / AMO_JWT_SECRET secrets are missing, so there is no signed Firefox .xpi in this release (Firefox can only load the unsigned build as a temporary add-on)."
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "Release ${{ steps.vars.outputs.VERSION }}"
+          name: "Release ${{ steps.vars.outputs.TAG }}"
           tag_name: ${{ github.ref }}
           draft: false
           prerelease: false
           generate_release_notes: true
-          files: |
-            letterboxd-companion-${{ steps.vars.outputs.VERSION }}.zip
-            letterboxd-companion-${{ steps.vars.outputs.VERSION }}-firefox.xpi
+          body: |
+            ### Install
+            - **Chrome / Edge / Brave / Opera**: download `letterboxd-companion-${{ steps.vars.outputs.TAG }}-chrome.xpi` (a zip archive: rename it to `.zip` if your system won't open it) and extract it, then in `chrome://extensions` turn on Developer mode and click **Load unpacked** on the extracted folder. To update, replace the folder's files and click the reload icon on the extension.
+            - **Firefox**: download `letterboxd-companion-${{ steps.vars.outputs.TAG }}-firefox.xpi`, then in `about:addons` click the gear icon › **Install Add-on From File…** and pick it (or drag the file onto a Firefox window). Firefox then updates it by itself.
+          files: dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
