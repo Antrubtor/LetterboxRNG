@@ -40,8 +40,7 @@ jobs:
         run: |
           mkdir -p ext dist
           cp -r manifest.json content.js content.css popup.html popup.css popup.js icons ext/
-          # Chrome package: a zip archive, named .xpi like the Firefox one
-          (cd ext && zip -r "../dist/letterboxd-companion-${{ steps.vars.outputs.TAG }}-chrome.xpi" .)
+          (cd ext && zip -r "../dist/letterboxd-companion-${{ steps.vars.outputs.TAG }}-chrome.zip" .)
 
       # Firefox only installs add-ons signed by Mozilla. "unlisted" = signed for self-distribution
       # (not published on addons.mozilla.org); updates come from updates.json below.
@@ -84,7 +83,7 @@ jobs:
           generate_release_notes: true
           body: |
             ### Install
-            - **Chrome / Edge / Brave / Opera**: download `letterboxd-companion-${{ steps.vars.outputs.TAG }}-chrome.xpi` (a zip archive: rename it to `.zip` if your system won't open it) and extract it, then in `chrome://extensions` turn on Developer mode and click **Load unpacked** on the extracted folder. To update, replace the folder's files and click the reload icon on the extension.
+            - **Chrome / Edge / Brave / Opera**: download `letterboxd-companion-${{ steps.vars.outputs.TAG }}-chrome.zip` and unzip it, then in `chrome://extensions` turn on Developer mode and click **Load unpacked** on the unzipped folder. To update, replace the folder's files and click the reload icon on the extension.
             - **Firefox**: download `letterboxd-companion-${{ steps.vars.outputs.TAG }}-firefox.xpi`, then in `about:addons` click the gear icon › **Install Add-on From File…** and pick it (or drag the file onto a Firefox window). Firefox then updates it by itself.
           files: dist/*
         env:

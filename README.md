@@ -56,7 +56,7 @@ A sleek, lightweight browser extension designed with **Letterboxd's authentic UI
 Download the packaged extension from the **[Releases](https://github.com/Antrubtor/LetterboxCompanion/releases)** page and install it in seconds:
 
 ### Chrome / Brave / Edge / Opera
-1. Download `letterboxd-companion-vX.X.X-chrome.xpi` from Releases and extract it (it's a zip archive: rename it to `.zip` if your system won't open it).
+1. Download `letterboxd-companion-vX.X.X-chrome.zip` from Releases and unzip it.
 2. Open `chrome://extensions/` and enable **Developer mode** (top-right toggle).
 3. Click **Load unpacked** and select the unzipped folder.
 4. To update: replace the folder's files with the new release, then click the reload icon on the extension card. The extension tells you when a new release is out.
@@ -80,7 +80,7 @@ Without them the release still has the Chrome package, but no Firefox `.xpi`.
 </details>
 
 ### Safari (macOS)
-1. Download `letterboxd-companion-vX.X.X-chrome.xpi` and extract it (rename it to `.zip` first if needed).
+1. Download and unzip `letterboxd-companion-vX.X.X-chrome.zip`.
 2. In Safari > **Settings** > **Advanced**, check **"Show features for web developers"**.
 3. In Safari > **Develop**, check **"Allow Unsigned Extensions"**.
 4. In Terminal, run Apple's extension converter:
